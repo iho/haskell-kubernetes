@@ -18,7 +18,7 @@ module Kubernetes.Operator.Manager
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async)
 import qualified Control.Concurrent.Async as Async
-import Control.Exception (SomeException, try)
+import Control.Exception (AsyncException (UserInterrupt), SomeException, fromException, try)
 import Control.Monad (forM_)
 import Data.Time (NominalDiffTime)
 import Kubernetes.Operator.Controller (CompiledController (..))
@@ -45,14 +45,20 @@ defaultManagerConfig =
     , mcInstallSigTermHandler = True
     }
 
--- | Run every controller concurrently until one of two things happens:
+-- | Run every controller concurrently until one of three things happens:
 --
 --   * a controller's 'ccRun' returns or throws on its own (e.g. an
 --     unrecoverable HTTP failure) — treated as fatal for the whole Manager,
 --     "let it crash" style: Kubernetes will restart the Pod and every
 --     controller resumes from a fresh LIST, which is exactly the recovery
---     path they're built to support; or
---   * shutdown is requested (Ctrl-C / SIGTERM).
+--     path they're built to support;
+--   * SIGTERM arrives, routed here by 'installSigTermHandler'; or
+--   * Ctrl-C (SIGINT) arrives — GHC's RTS turns this into the async
+--     exception 'UserInterrupt' delivered straight to this thread (it's
+--     what's blocked in 'Async.waitAny' below), so it's caught and handled
+--     as its own case rather than falling into the generic "a controller
+--     failed" branch — the same distinction the base client's Ctrl-C
+--     handling makes.
 --
 -- Either way, every controller is asked to stop gracefully
 -- ('ccShutdown'), given 'mcShutdownGracePeriod' to finish in-flight
@@ -65,7 +71,11 @@ runManager cfg ctrls = do
   withAsyncs (map ccRun ctrls) $ \asyncs -> do
     outcome <- try (Async.waitAny asyncs) :: IO (Either SomeException (Async (), ()))
     case outcome of
-      Left e -> hPutStrLn stderr ("Manager: a controller failed: " <> show e)
+      Left e
+        | Just UserInterrupt <- fromException e ->
+            putStrLn "Manager: interrupted by user, shutting down."
+        | otherwise ->
+            hPutStrLn stderr ("Manager: a controller failed: " <> show e)
       Right _ -> pure ()
 
     shutdownAll
