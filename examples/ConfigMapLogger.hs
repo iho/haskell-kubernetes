@@ -45,6 +45,7 @@ instance Resource ConfigMap where
   resourceScope _ = Namespaced
   resourcePlural _ = "configmaps"
   resourceMeta = cmMeta
+  resourceSetMeta m cm = cm {cmMeta = m}
 
 -- | The whole reconciler: look the object up by key (never trust an event
 -- payload — see 'Request''s Haddock for why), and log what's there now, or

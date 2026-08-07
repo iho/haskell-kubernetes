@@ -17,6 +17,8 @@ module Kubernetes.Operator
   , module Kubernetes.Operator.Reflector
   , module Kubernetes.Operator.Controller
   , module Kubernetes.Operator.Manager
+  , module Kubernetes.Operator.Metrics
+  , module Kubernetes.Operator.Finalizer
 
     -- * Reused from "Kubernetes.Client"
   , Log
@@ -46,7 +48,9 @@ import Kubernetes.Client
 import Kubernetes.Operator.Cache
 import Kubernetes.Operator.Client
 import Kubernetes.Operator.Controller
+import Kubernetes.Operator.Finalizer
 import Kubernetes.Operator.Manager
+import Kubernetes.Operator.Metrics
 import Kubernetes.Operator.Reflector
 import Kubernetes.Operator.Types
 import Kubernetes.Operator.Workqueue

@@ -66,6 +66,8 @@ library
                        , Kubernetes.Operator.Reflector
                        , Kubernetes.Operator.Controller
                        , Kubernetes.Operator.Manager
+                       , Kubernetes.Operator.Metrics
+                       , Kubernetes.Operator.Finalizer
     other-modules:      Kubernetes.Operator.Internal.Async
     hs-source-dirs:     src
     default-language:   GHC2024

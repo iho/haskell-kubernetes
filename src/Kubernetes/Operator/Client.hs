@@ -30,17 +30,25 @@ module Kubernetes.Operator.Client
   , nextEvent
   , closeWatch
   , runKubeClientIO
+
+    -- * Writes (opt-in — see 'KubeWriter')
+  , KubeWriter
+  , updateResource
+  , updateStatus
+  , runKubeWriterIO
   ) where
 
 import Control.Exception (throwIO)
 import Data.Aeson
   ( FromJSON (..)
+  , ToJSON (..)
   , Value
   , eitherDecodeStrict
   , withObject
   , withText
   , (.:)
   )
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
@@ -53,11 +61,12 @@ import qualified Data.Text.Encoding.Error as TE
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, send)
 import Kubernetes.Client (KubeApiError (..), KubeConfig (..))
-import Kubernetes.Resource (GVK (..), Resource (..), Scope (..), WatchScope (..))
+import Kubernetes.Resource (GVK (..), ObjectKey (okName), Resource (..), Scope (..), WatchScope (..))
 import Network.HTTP.Client
   ( BodyReader
   , Manager
   , Request (..)
+  , RequestBody (RequestBodyLBS)
   , Response
   , brConsume
   , brRead
@@ -71,7 +80,7 @@ import Network.HTTP.Client
   , responseTimeoutNone
   , setQueryString
   )
-import Network.HTTP.Types (hAuthorization, statusCode, statusIsSuccessful)
+import Network.HTTP.Types (hAuthorization, hContentType, statusCode, statusIsSuccessful)
 import qualified Network.HTTP.Types as HTTP
 import System.IO (hPutStrLn, stderr)
 
@@ -144,6 +153,69 @@ nextEvent = send . NextEvent
 
 closeWatch :: (Resource a, KubeClient a :> es) => WatchHandle a -> Eff es ()
 closeWatch = send . CloseWatch
+
+-- | Write access to a resource kind, kept as a separate effect from
+-- 'KubeClient' rather than folded into it. Every 'KubeClient' operation
+-- only ever needs 'FromJSON'; a write needs 'ToJSON' too, and most
+-- controllers (anything read-only/observability-only, like the
+-- ConfigMap-logger example) never write anything. Splitting the effect
+-- means read-only reconcilers never have to satisfy 'ToJSON' for a type
+-- they never intend to serialize — 'Kubernetes.Operator.Controller.compileController'
+-- doesn't require it; only 'Kubernetes.Operator.Controller.compileControllerWithWriter'
+-- (and reconcilers that opt in via 'Kubernetes.Operator.Controller.CtxRW')
+-- does.
+--
+-- This is the effect finalizers and status-subresource updates are built
+-- on — see "Kubernetes.Operator.Finalizer".
+data KubeWriter a :: Effect where
+  UpdateResource :: a -> KubeWriter a m a
+  UpdateStatusResource :: a -> KubeWriter a m a
+
+type instance DispatchOf (KubeWriter a) = Dynamic
+
+-- | PUT the object back (its full body, whatever 'ToJSON' produces) to its
+-- own resource URL. The object should normally be one just read out of the
+-- 'Kubernetes.Operator.Cache.Cache' (or the result of a previous write),
+-- so its @resourceVersion@ matches what the server has — a stale one is
+-- rejected with a 409 Conflict, surfaced here as a 'KubeApiError'.
+updateResource :: (Resource a, ToJSON a, KubeWriter a :> es) => a -> Eff es a
+updateResource = send . UpdateResource
+
+-- | As 'updateResource', but PUTs to the @\/status@ subresource — the
+-- normal way to report observed state without racing writers of the
+-- user-facing spec (a real cluster enforces this split via RBAC and the
+-- CRD's subresource configuration; this client just hits the different
+-- URL).
+updateStatus :: (Resource a, ToJSON a, KubeWriter a :> es) => a -> Eff es a
+updateStatus = send . UpdateStatusResource
+
+runKubeWriterIO
+  :: forall a es r
+   . (Resource a, ToJSON a, FromJSON a, IOE :> es)
+  => Manager
+  -> KubeConfig
+  -> WatchScope
+  -> Eff (KubeWriter a : es) r
+  -> Eff es r
+runKubeWriterIO mgr cfg scope = interpret $ \_ -> \case
+  UpdateResource obj -> liftIO (doWrite @a mgr cfg scope "" obj)
+  UpdateStatusResource obj -> liftIO (doWrite @a mgr cfg scope "/status" obj)
+
+doWrite :: forall a. (Resource a, ToJSON a, FromJSON a) => Manager -> KubeConfig -> WatchScope -> String -> a -> IO a
+doWrite mgr cfg scope suffix obj = do
+  let path = resourcePath @a scope <> "/" <> T.unpack (okName (resourceKey obj)) <> suffix
+  req0 <- buildRequest cfg path []
+  let req =
+        req0
+          { method = "PUT"
+          , requestBody = RequestBodyLBS (Aeson.encode obj)
+          , requestHeaders = (hContentType, "application/json") : requestHeaders req0
+          }
+  resp <- httpLbs req mgr
+  checkStatus (responseStatus resp) (responseBody resp)
+  case eitherDecodeStrict (BL.toStrict (responseBody resp)) of
+    Left err -> throwIO (KubeApiError 0 ("failed to decode write response: " <> T.pack err))
+    Right updated -> pure updated
 
 -- | Real HTTP interpreter. 'WatchScope' picks which namespace(s) this
 -- particular controller watches; see its Haddock for why that's not part

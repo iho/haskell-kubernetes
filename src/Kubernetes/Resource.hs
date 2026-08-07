@@ -16,7 +16,8 @@ module Kubernetes.Resource
   , Resource (..)
   ) where
 
-import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
+import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 
 -- | Group/Version/Kind. Group is @""@ for core/v1 types (Pod, ConfigMap, ...).
@@ -55,14 +56,17 @@ renderKey (ObjectKey Nothing n) = n
 renderKey (ObjectKey (Just ns) n) = ns <> "/" <> n
 
 -- | The subset of every object's @metadata@ the generic machinery cares
--- about. Enough for caching, keying, and (later) finalizers — deliberately
--- not a full copy of every possible metadata field.
+-- about. Enough for caching, keying, and finalizers — deliberately not a
+-- full copy of every possible metadata field (labels/annotations/owner
+-- references are all still missing; add them here if a reconciler needs
+-- them, following the same pattern).
 data ObjectMeta = ObjectMeta
   { omName :: !Text
   , omNamespace :: !(Maybe Text)
   , omResourceVersion :: !(Maybe Text)
   , omUid :: !(Maybe Text)
   , omDeletionTimestamp :: !(Maybe Text)
+  , omFinalizers :: ![Text]
   }
   deriving (Show, Eq)
 
@@ -74,6 +78,26 @@ instance FromJSON ObjectMeta where
       <*> o .:? "resourceVersion"
       <*> o .:? "uid"
       <*> o .:? "deletionTimestamp"
+      <*> (fromMaybe [] <$> o .:? "finalizers")
+
+-- | Only needed for write operations (see
+-- 'Kubernetes.Operator.Client.KubeWriter'); read-only controllers never
+-- touch this. @resourceVersion@ is included so a PUT built from a value
+-- read out of the Cache carries the optimistic-concurrency token the API
+-- server expects — omitting or staling it is exactly what turns into a 409
+-- Conflict.
+instance ToJSON ObjectMeta where
+  toJSON m =
+    object $
+      [ "name" .= omName m
+      , "finalizers" .= omFinalizers m
+      ]
+        ++ catMaybes
+          [ ("namespace" .=) <$> omNamespace m
+          , ("resourceVersion" .=) <$> omResourceVersion m
+          , ("uid" .=) <$> omUid m
+          , ("deletionTimestamp" .=) <$> omDeletionTimestamp m
+          ]
 
 -- | One instance per Kind you want to list/watch/reconcile — Pod,
 -- ConfigMap, or a CRD type you define yourself. This is the extension
@@ -89,6 +113,12 @@ class Resource a where
   resourcePlural :: proxy a -> Text
 
   resourceMeta :: a -> ObjectMeta
+
+  -- | The setter half of 'resourceMeta'. Only needed for writes (see
+  -- "Kubernetes.Operator.Finalizer", which uses it to persist a modified
+  -- finalizer list) — read-only reconcilers never call it. Almost always
+  -- just a record update, e.g. @resourceSetMeta m cm = cm { cmMeta = m }@.
+  resourceSetMeta :: ObjectMeta -> a -> a
 
   resourceKey :: a -> ObjectKey
   resourceKey x = ObjectKey (omNamespace m) (omName m)
