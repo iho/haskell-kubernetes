@@ -1,0 +1,4 @@
+dist-newstyle/
+.claude/settings.local.json
+*.hi
+*.o
