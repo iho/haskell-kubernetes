@@ -57,6 +57,16 @@ common warnings
 library
     import:             warnings
     exposed-modules:    Kubernetes.Client
+                       , Kubernetes.Resource
+                       , Kubernetes.Operator
+                       , Kubernetes.Operator.Types
+                       , Kubernetes.Operator.Cache
+                       , Kubernetes.Operator.Workqueue
+                       , Kubernetes.Operator.Client
+                       , Kubernetes.Operator.Reflector
+                       , Kubernetes.Operator.Controller
+                       , Kubernetes.Operator.Manager
+    other-modules:      Kubernetes.Operator.Internal.Async
     hs-source-dirs:     src
     default-language:   GHC2024
     default-extensions: OverloadedStrings
@@ -68,8 +78,17 @@ library
       , bytestring
       , text
       , time
+      , stm
+      , async
+      , containers
+      , unix
       , http-client      >=0.7
+      , http-client-tls
+      , connection
+      , tls
+      , x509-store
       , http-types
+      , directory
 
 executable kube-hs
     -- Import common warning flags.
@@ -86,17 +105,44 @@ executable kube-hs
         base             ^>=4.20.2.0
       , kube-hs
       , effectful
-      , text
-      , bytestring
-      , directory
-      , http-client
-      , http-client-tls
-      , connection
-      , tls
-      , x509-store
 
     -- Directories containing source files.
     hs-source-dirs:   exe
 
     -- Base language which the package is written in.
     default-language: GHC2024
+
+executable configmap-logger
+    import:              warnings
+    main-is:             ConfigMapLogger.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
+test-suite kube-hs-test
+    import:              warnings
+    type:                exitcode-stdio-1.0
+    main-is:             Spec.hs
+    hs-source-dirs:      test
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , bytestring
+      , stm
+      , async
+      , text
+      , http-types
+      , wai
+      , warp

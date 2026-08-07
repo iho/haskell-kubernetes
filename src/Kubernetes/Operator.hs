@@ -1,0 +1,53 @@
+-- | Public facade for the operator framework. Import this module rather
+-- than the individual @Kubernetes.Operator.*@ modules for normal use.
+--
+-- Deliberately does /not/ re-export the whole of "Kubernetes.Client":
+-- that module's @KubeClient@\/@WatchEvent@ are the original Pod-only demo
+-- effect and would clash with this module's generalized, resource-
+-- parametrized versions of the same names from
+-- "Kubernetes.Operator.Client". Only the pieces every operator author
+-- needs regardless — logging and cluster connection config — are
+-- re-exported explicitly below.
+module Kubernetes.Operator
+  ( module Kubernetes.Resource
+  , module Kubernetes.Operator.Types
+  , module Kubernetes.Operator.Cache
+  , module Kubernetes.Operator.Workqueue
+  , module Kubernetes.Operator.Client
+  , module Kubernetes.Operator.Reflector
+  , module Kubernetes.Operator.Controller
+  , module Kubernetes.Operator.Manager
+
+    -- * Reused from "Kubernetes.Client"
+  , Log
+  , LogLevel (..)
+  , logInfo
+  , logWarn
+  , logErr
+  , KubeConfig (..)
+  , Namespace (..)
+  , KubeApiError (..)
+  , newManagerFor
+  , loadKubeConfig
+  ) where
+
+import Kubernetes.Client
+  ( KubeApiError (..)
+  , KubeConfig (..)
+  , Log
+  , LogLevel (..)
+  , Namespace (..)
+  , loadKubeConfig
+  , logErr
+  , logInfo
+  , logWarn
+  , newManagerFor
+  )
+import Kubernetes.Operator.Cache
+import Kubernetes.Operator.Client
+import Kubernetes.Operator.Controller
+import Kubernetes.Operator.Manager
+import Kubernetes.Operator.Reflector
+import Kubernetes.Operator.Types
+import Kubernetes.Operator.Workqueue
+import Kubernetes.Resource
