@@ -1,0 +1,15 @@
+FROM haskell:9.10.3
+
+WORKDIR /build
+COPY kube-hs.cabal ./
+RUN cabal update
+COPY src ./src
+COPY exe ./exe
+COPY examples ./examples
+RUN cabal build exe:website-webhook
+
+RUN mkdir -p /out && cp "$(cabal list-bin website-webhook)" /out/website-webhook
+COPY server.crt server.key /out/
+
+WORKDIR /out
+ENTRYPOINT ["/out/website-webhook", "/out/server.crt", "/out/server.key", "8443"]

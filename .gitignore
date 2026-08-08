@@ -2,3 +2,6 @@ dist-newstyle/
 .claude/settings.local.json
 *.hi
 *.o
+*.pem
+server.crt
+server.key

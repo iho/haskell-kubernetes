@@ -69,6 +69,7 @@ library
                        , Kubernetes.Operator.Metrics
                        , Kubernetes.Operator.Finalizer
                        , Kubernetes.Operator.LeaderElection
+                       , Kubernetes.Operator.Webhook
                        , Kubernetes.Codegen.Schema
                        , Kubernetes.Codegen.Generate
     other-modules:      Kubernetes.Operator.Internal.Async
@@ -81,6 +82,7 @@ library
       , effectful        >=2.3 && <2.6
       , aeson            >=2.0
       , bytestring
+      , base64-bytestring
       , text
       , time
       , stm
@@ -89,10 +91,13 @@ library
       , unix
       , http-client      >=0.7
       , http-client-tls
+      , http-types
       , connection
       , tls
       , x509-store
-      , http-types
+      , wai
+      , warp
+      , warp-tls
       , directory
 
 executable kube-hs
@@ -156,6 +161,23 @@ executable leader-election-demo
         base             ^>=4.20.2.0
       , kube-hs
       , text
+
+executable website-webhook
+    import:              warnings
+    main-is:             WebsiteWebhook.hs
+    other-modules:       Website
+    hs-source-dirs:      examples, examples/generated
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , aeson
+      , containers
+      , text
+      , wai
+      , http-types
 
 executable leader-elected-configmap-logger
     import:              warnings
