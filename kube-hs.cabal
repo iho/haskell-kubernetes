@@ -68,6 +68,8 @@ library
                        , Kubernetes.Operator.Manager
                        , Kubernetes.Operator.Metrics
                        , Kubernetes.Operator.Finalizer
+                       , Kubernetes.Codegen.Schema
+                       , Kubernetes.Codegen.Generate
     other-modules:      Kubernetes.Operator.Internal.Async
     hs-source-dirs:     src
     default-language:   GHC2024
@@ -126,6 +128,35 @@ executable configmap-logger
       , effectful
       , aeson
       , containers
+      , text
+
+executable website-operator
+    import:              warnings
+    main-is:             WebsiteOperator.hs
+    other-modules:       Website
+    hs-source-dirs:      examples, examples/generated
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
+executable crd-codegen
+    import:              warnings
+    main-is:             Main.hs
+    hs-source-dirs:      codegen
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , aeson
+      , yaml
+      , bytestring
       , text
 
 test-suite kube-hs-test

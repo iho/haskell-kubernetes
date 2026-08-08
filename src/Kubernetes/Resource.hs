@@ -8,16 +8,31 @@
 -- generalized 'KubeClient' interpreter (roadmap step 1) will require both.
 module Kubernetes.Resource
   ( GVK (..)
+  , apiVersionOf
   , Scope (..)
   , WatchScope (..)
   , ObjectKey (..)
   , renderKey
   , ObjectMeta (..)
   , Resource (..)
+  , IntOrString (..)
+  , envelopeParseJSON
+  , envelopeToJSON
   ) where
 
-import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Aeson
+  ( FromJSON (..)
+  , ToJSON (..)
+  , Value
+  , object
+  , withObject
+  , (.:)
+  , (.:?)
+  , (.=)
+  )
+import Control.Applicative ((<|>))
+import Data.Aeson.Types (Parser)
+import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import Data.Text (Text)
 
 -- | Group/Version/Kind. Group is @""@ for core/v1 types (Pod, ConfigMap, ...).
@@ -27,6 +42,13 @@ data GVK = GVK
   , gvkKind :: !Text
   }
   deriving (Show, Eq)
+
+-- | The @apiVersion@ field's wire format: @group\/version@, or just
+-- @version@ for the core group (@gvkGroup = ""@, e.g. @v1@ for ConfigMap).
+apiVersionOf :: GVK -> Text
+apiVersionOf (GVK grp ver _)
+  | grp == "" = ver
+  | otherwise = grp <> "/" <> ver
 
 -- | Whether a kind lives under @/namespaces/{ns}/...@ or is cluster-scoped.
 -- Fixed per-type (an instance property); see 'WatchScope' for the
@@ -124,3 +146,37 @@ class Resource a where
   resourceKey x = ObjectKey (omNamespace m) (omName m)
     where
       m = resourceMeta x
+
+-- | The Kubernetes API's @x-kubernetes-int-or-string@ convention (used for
+-- things like container ports and percentage-or-absolute values): the wire
+-- value is either a JSON number or a JSON string, and callers are expected
+-- to accept either. One shared type rather than per-CRD duplicates.
+data IntOrString = IOSInt !Int | IOSString !Text
+  deriving (Show, Eq)
+
+instance FromJSON IntOrString where
+  parseJSON v = (IOSInt <$> parseJSON v) <|> (IOSString <$> parseJSON v)
+
+instance ToJSON IntOrString where
+  toJSON (IOSInt n) = toJSON n
+  toJSON (IOSString s) = toJSON s
+
+-- | The common shape of a full Kubernetes object's JSON: fixed
+-- @apiVersion@\/@kind@ (from its 'GVK', not stored redundantly on the
+-- Haskell value), @metadata@, @spec@, and an optional @status@. Most
+-- hand-written or generated 'FromJSON'\/'ToJSON' instances can be built
+-- directly from these instead of repeating the envelope shape per type —
+-- see the generated code from @crd-codegen@ for the intended usage.
+envelopeParseJSON :: (FromJSON spec, FromJSON status) => Value -> Parser (ObjectMeta, spec, Maybe status)
+envelopeParseJSON = withObject "Kubernetes object" $ \o ->
+  (,,) <$> o .: "metadata" <*> o .: "spec" <*> o .:? "status"
+
+envelopeToJSON :: (ToJSON spec, ToJSON status) => GVK -> ObjectMeta -> spec -> Maybe status -> Value
+envelopeToJSON g m s mSt =
+  object $
+    [ "apiVersion" .= apiVersionOf g
+    , "kind" .= gvkKind g
+    , "metadata" .= m
+    , "spec" .= s
+    ]
+      ++ maybeToList (("status" .=) <$> mSt)
