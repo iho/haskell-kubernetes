@@ -43,9 +43,8 @@ instance FromJSON ConfigMap where
 -- @cmMeta@).
 deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
-reconcileConfigMap :: (Ctx ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileConfigMap (Request key) = do
-  mCm <- cacheGet @ConfigMap key
+reconcileConfigMap :: (Ctx ConfigMap es) => Request -> Maybe ConfigMap -> Eff es (Either ReconcileError ReconcileResult)
+reconcileConfigMap (Request key) mCm = do
   case mCm of
     Nothing -> logInfo ("configmap " <> renderKey key <> " deleted") >> done
     Just cm -> do
@@ -69,7 +68,7 @@ main = do
           , csScope = scope
           , csWorkers = 4
           , csMaxRetries = 5
-          , csReconcile = reconcileConfigMap
+          , csReconcile = onCached reconcileConfigMap
           }
 
       leaderNamespace = case kcNamespace kubeConfig of

@@ -179,9 +179,8 @@ buildChildWrites kubeConfig = do
 
 -- | Reconciler: ensure the child Deployment exists and matches the CR, own
 -- it, and report its readiness back into the CR's status.
-reconcileService :: ChildWrites -> (CtxRW Service es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileService child (Request key) = do
-  mSvc <- cacheGet @Service key
+reconcileService :: ChildWrites -> (CtxRW Service es) => Request -> Maybe Service -> Eff es (Either ReconcileError ReconcileResult)
+reconcileService child (Request key) mSvc = do
   case mSvc of
     Nothing -> do
       logInfo (renderKey key <> " deleted")
@@ -241,7 +240,7 @@ main = do
           , crsScope = scope
           , crsWorkers = 2
           , crsMaxRetries = 5
-          , crsReconcile = reconcileService child
+          , crsReconcile = onCached (reconcileService child)
           }
 
   metrics <- newMetricsRegistry

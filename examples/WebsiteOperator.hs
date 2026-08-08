@@ -42,9 +42,8 @@ readyCondition =
     , websiteStatusConditionsItemStatus = "True"
     }
 
-reconcileWebsite :: (CtxRW Website es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileWebsite (Request key) = do
-  mSite <- cacheGet @Website key
+reconcileWebsite :: (CtxRW Website es) => Request -> Maybe Website -> Eff es (Either ReconcileError ReconcileResult)
+reconcileWebsite (Request key) mSite = do
   case mSite of
     Nothing -> do
       logInfo ("website " <> renderKey key <> " gone")
@@ -118,7 +117,7 @@ main = do
           , crsScope = scope
           , crsWorkers = 2
           , crsMaxRetries = 5
-          , crsReconcile = reconcileWebsite
+          , crsReconcile = onCached reconcileWebsite
           }
 
   metrics <- newMetricsRegistry

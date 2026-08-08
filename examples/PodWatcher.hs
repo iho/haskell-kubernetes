@@ -34,9 +34,8 @@ instance FromJSON Pod where
 -- "v1"/kind "Pod"/plural "pods", namespaced, metadata field @podMeta@).
 deriveResource ''Pod "" "v1" "Pod" "pods" True 'podMeta
 
-reconcilePod :: (Ctx Pod es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcilePod (Request key) = do
-  mPod <- cacheGet @Pod key
+reconcilePod :: (Ctx Pod es) => Request -> Maybe Pod -> Eff es (Either ReconcileError ReconcileResult)
+reconcilePod (Request key) mPod = do
   case mPod of
     Nothing -> logInfo (renderKey key <> " deleted") >> done
     Just pod -> do
@@ -58,7 +57,7 @@ main = do
           , csScope = scope
           , csWorkers = 2
           , csMaxRetries = 3
-          , csReconcile = reconcilePod
+          , csReconcile = onCached reconcilePod
           }
 
   metrics <- newMetricsRegistry

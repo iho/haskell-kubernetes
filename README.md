@@ -95,14 +95,13 @@ instance FromJSON ConfigMap where
 
 deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
--- 2. The reconciler: read current state from the Cache, react.
-reconcile :: (Ctx ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcile (Request key) = do
-  mCm <- cacheGet @ConfigMap key
-  case mCm of
-    Nothing -> logInfo (renderKey key <> " deleted") >> done
-    Just cm -> logInfo (renderKey key <> " keys: " <> T.pack (show (Map.keys (cmData cm))))
-                 >> done
+-- 2. The reconciler: `onCached` has already read current state from the
+--    Cache for the requested key — just react to it.
+reconcile :: (Ctx ConfigMap es) => Request -> Maybe ConfigMap -> Eff es (Either ReconcileError ReconcileResult)
+reconcile (Request key) mCm = case mCm of
+  Nothing -> logInfo (renderKey key <> " deleted") >> done
+  Just cm -> logInfo (renderKey key <> " keys: " <> T.pack (show (Map.keys (cmData cm))))
+               >> done
 
 -- 3. Wire it up and run.
 main :: IO ()
@@ -111,7 +110,7 @@ main = do
   let spec :: ControllerSpec ConfigMap
       spec = ControllerSpec
         { csName = "configmap-logger", csScope = WatchAllNamespaces
-        , csWorkers = 4, csMaxRetries = 5, csReconcile = reconcile
+        , csWorkers = 4, csMaxRetries = 5, csReconcile = onCached reconcile
         }
   metrics <- newMetricsRegistry
   controller <- compileController kubeConfig defaultOperatorConfig metrics spec
@@ -157,6 +156,23 @@ time. Two small helpers remove most of the noise:
       Ok        -> done
       NotReady  -> requeueAfter 2
       Invalid s -> permanentError s
+  ```
+
+- **`onCached`** (`Kubernetes.Operator.Cache`): wraps a `Request -> Maybe a
+  -> Eff es (...)` reconciler into the `Request -> Eff es (...)` shape
+  `csReconcile`/`crsReconcile` expects, so the reconciler doesn't have to
+  start with its own `cacheGet @a key`. It still looks the object up fresh,
+  right before the reconciler body runs — same timing as calling `cacheGet`
+  by hand — so `Request`'s level-triggered contract (see its Haddock) is
+  unaffected; it's purely one line of boilerplate removed.
+
+  ```haskell
+  reconcile :: (Ctx ConfigMap es) => Request -> Maybe ConfigMap -> Eff es (Either ReconcileError ReconcileResult)
+  reconcile (Request key) mCm = case mCm of
+    Nothing -> logInfo "deleted" >> done
+    Just cm -> ...
+
+  -- csReconcile = onCached reconcile
   ```
 
 ## Connecting to a cluster

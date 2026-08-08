@@ -17,6 +17,7 @@ module Kubernetes.Operator.Cache
   , cacheDelete
   , cacheReplace
   , cacheResourceVersion
+  , onCached
   , CacheStore
   , newCacheStore
   , runCacheIO
@@ -28,6 +29,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, send)
+import Kubernetes.Operator.Types (Request (..))
 import Kubernetes.Resource (ObjectKey, Resource (..))
 
 data Cache a :: Effect where
@@ -58,6 +60,21 @@ cacheReplace items rv = send (CacheReplace items rv)
 
 cacheResourceVersion :: forall a es. (Cache a :> es) => Eff es (Maybe Text)
 cacheResourceVersion = send (CacheResourceVersion :: Cache a (Eff es) (Maybe Text))
+
+-- | Convenience wrapper for the overwhelmingly common reconciler shape:
+-- look the requested object up in the Cache, then hand it (or 'Nothing', if
+-- it's been deleted) straight to the reconcile logic — @Request -> Eff es
+-- (Either ReconcileError ReconcileResult)@ built from @Request -> Maybe a ->
+-- Eff es (Either ReconcileError ReconcileResult)@, one 'cacheGet' fewer to
+-- write by hand.
+--
+-- This does /not/ change 'Request''s level-triggered contract: the lookup
+-- still happens fresh, right here, at the moment reconciliation actually
+-- runs — exactly when a reconciler calling 'cacheGet' itself would do it —
+-- not once at enqueue time. See 'Request''s Haddock for why that timing is
+-- what makes an operator self-healing.
+onCached :: (Cache a :> es) => (Request -> Maybe a -> Eff es b) -> Request -> Eff es b
+onCached f req@(Request key) = cacheGet key >>= f req
 
 data CacheStore a = CacheStore
   { csItems :: !(TVar (Map ObjectKey a))

@@ -45,14 +45,14 @@ instance FromJSON ConfigMap where
 -- Here the whole instance is generated from one line by 'deriveResource'.
 deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
--- | The whole reconciler: look the object up by key (never trust an event
--- payload — see 'Request''s Haddock for why), and log what's there now, or
--- that it's gone. Real reconcilers would also *act* on the state (create a
--- companion resource, call out to something) but the shape — read current
--- state from the Cache, decide, report a 'ReconcileResult' — is the same.
-reconcileConfigMap :: (Ctx ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileConfigMap (Request key) = do
-  mCm <- cacheGet @ConfigMap key
+-- | The whole reconciler: 'onCached' has already looked the object up by key
+-- (never trust an event payload — see 'Request''s Haddock for why), so this
+-- just logs what's there now, or that it's gone. Real reconcilers would also
+-- *act* on the state (create a companion resource, call out to something)
+-- but the shape — read current state from the Cache, decide, report a
+-- 'ReconcileResult' — is the same.
+reconcileConfigMap :: (Ctx ConfigMap es) => Request -> Maybe ConfigMap -> Eff es (Either ReconcileError ReconcileResult)
+reconcileConfigMap (Request key) mCm = do
   case mCm of
     Nothing -> do
       logInfo ("configmap " <> renderKey key <> " deleted")
@@ -85,7 +85,7 @@ main = do
           , csScope = scope
           , csWorkers = 4
           , csMaxRetries = 5
-          , csReconcile = reconcileConfigMap
+          , csReconcile = onCached reconcileConfigMap
           }
 
   metrics <- newMetricsRegistry

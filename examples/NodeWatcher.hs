@@ -62,9 +62,8 @@ nodeReady n =
     (any (\c -> nodeCondType c == "Ready" && nodeCondStatus c == "True") . nodeConditions)
     (nodeStatus n)
 
-reconcileNode :: (Ctx Node es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileNode (Request key) = do
-  mNode <- cacheGet @Node key
+reconcileNode :: (Ctx Node es) => Request -> Maybe Node -> Eff es (Either ReconcileError ReconcileResult)
+reconcileNode (Request key) mNode = do
   case mNode of
     Nothing -> logInfo (renderKey key <> " deleted") >> done
     Just n -> do
@@ -84,7 +83,7 @@ main = do
           , csScope = WatchAllNamespaces
           , csWorkers = 2
           , csMaxRetries = 3
-          , csReconcile = reconcileNode
+          , csReconcile = onCached reconcileNode
           }
 
   metrics <- newMetricsRegistry

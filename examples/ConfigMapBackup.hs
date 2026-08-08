@@ -74,14 +74,13 @@ backupName (ObjectKey _ name) = name <> "-backup"
 backupData :: ConfigMap -> Map Text Text
 backupData src = Map.delete backupKey (cmData src)
 
--- | Reads the source from the Cache (never trusts an event payload), then
--- ensures the backup exists and matches: create it if absent, update it if
--- its data has drifted. Returns 'Done' either way — reconciliation is
--- level-triggered, so a future watch event on the backup itself isn't
--- required to heal a missed write.
-reconcileBackup :: (CtxRW ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
-reconcileBackup (Request srcKey) = do
-  mSrc <- cacheGet @ConfigMap srcKey
+-- | Handed the source straight from the Cache by 'onCached' (never trusts an
+-- event payload), then ensures the backup exists and matches: create it if
+-- absent, update it if its data has drifted. Returns 'Done' either way —
+-- reconciliation is level-triggered, so a future watch event on the backup
+-- itself isn't required to heal a missed write.
+reconcileBackup :: (CtxRW ConfigMap es) => Request -> Maybe ConfigMap -> Eff es (Either ReconcileError ReconcileResult)
+reconcileBackup (Request srcKey) mSrc = do
   case mSrc of
     Nothing -> do
       logInfo (renderKey srcKey <> " deleted, nothing to back up")
@@ -135,7 +134,7 @@ main = do
           , crsScope = scope
           , crsWorkers = 2
           , crsMaxRetries = 5
-          , crsReconcile = reconcileBackup
+          , crsReconcile = onCached reconcileBackup
           }
 
   metrics <- newMetricsRegistry
