@@ -215,7 +215,7 @@ skips verification — do **not** do this against anything you care about.
 | `Kubernetes.Operator.Cache` | The informer's local read cache. |
 | `Kubernetes.Operator.Workqueue` | Rate-limited, deduplicating work queue (client-go style). |
 | `Kubernetes.Operator.Reflector` | LIST + watch loop feeding the Cache and Workqueue; auto-resyncs on stream end or `410 Gone`. |
-| `Kubernetes.Operator.Controller` | `Ctx`/`CtxRW` constraints, `ControllerSpec(RW)`, `compileController(WithWriter)`. |
+| `Kubernetes.Operator.Controller` | `Ctx`/`CtxRW` constraints, `ControllerSpec(RW)`, `compileController(WithWriter)`, `SecondaryWatch`/`watchOwnedBy`. |
 | `Kubernetes.Operator.Manager` | Runs one or more compiled controllers; graceful SIGTERM/Ctrl-C shutdown. |
 | `Kubernetes.Operator.Finalizer` | `ensureFinalizer` / `finalizeAndRemove`. |
 | `Kubernetes.Operator.OwnerReference` | `setControllerReference` / `ensureControllerReference` and friends. |
@@ -240,7 +240,7 @@ Each is a complete `main`, runnable with `cabal run <name>` against
 | `configmap-backup` | The minimal **write** operator: `compileControllerWithWriter`, `createResource`/`updateResource`, owner references / garbage collection against a built-in kind. |
 | `website-operator` | The comprehensive example: a generated CRD type, finalizers, status subresource writes, metrics — via `ControllerSpecRW`/`compileControllerWithWriter`. |
 | `website-webhook` | Validating + mutating admission webhooks for the same CRD, served over TLS. |
-| `service-deployer` | A **cross-kind** operator: a CRD reconciler that creates and owns a Deployment (the documented hand-rolled-interpreter escape hatch). |
+| `service-deployer` | A **cross-kind** operator: a CRD reconciler that creates and owns a Deployment (the documented hand-rolled-interpreter escape hatch for writes) and watches it via `watchOwnedBy` instead of polling for its readiness. |
 | `crd-codegen` | The codegen CLI itself (see below). |
 
 ## Generating Haskell types from a CRD
@@ -338,6 +338,46 @@ correctly is the whole job. The real API server's built-in
 garbage-collector controller does the actual cascading delete, entirely
 server-side, once the owner is gone.
 
+## Secondary watches
+
+A controller only reconciles on changes to the one kind it's watching. If
+it creates/owns a *different* kind (a CRD's reconciler managing a child
+Deployment, say), that child's server-side state — readiness, a status
+subresource, anything the API server or another controller writes back —
+can change with no corresponding change to the kind actually being watched.
+The naive fix is a periodic `requeueAfter` poll; `watchOwnedBy` instead adds
+a real watch on the child kind, translating each change into the owning
+object's key via its `ownerReferences`:
+
+```haskell
+spec :: ControllerSpecRW Service
+spec =
+  ControllerSpecRW
+    { ...
+    , crsSecondaryWatches = [watchOwnedBy @Service @Deployment scope]
+    , crsReconcile = ...
+    }
+```
+
+Both type parameters are fixed by `TypeApplications` at the call site (the
+owner kind, then the child kind) since neither is inferable from `scope`
+alone. Under the hood this compiles to its own
+`Kubernetes.Operator.Reflector.reflectorLoopFor` thread — its own Cache and
+KubeClient interpreter for the child kind, same self-contained-stack shape
+as `service-deployer`'s hand-rolled `ChildWrites` (see "Known limitations"
+below) — except every change it sees is pushed onto the *primary*
+controller's own Workqueue instead of a queue of its own, so a child update
+re-triggers the owner's reconcile exactly like a change to the owner itself
+would. If a controller creates several child kinds, pass one
+`SecondaryWatch` per kind.
+
+Owner-reference matching only compares `apiVersion`/`kind`/`name` (not
+`uid`) — good enough to route the reconcile; the reconciler itself, reading
+back the current owner from its own Cache, is what actually confirms
+identity. See `examples/ServiceDeployer.hs` for the full example: it used
+to `requeueAfter 10` to poll the child Deployment's readiness, and no longer
+needs to.
+
 ## Leader election
 
 ```haskell
@@ -379,7 +419,9 @@ nothing shipped without it.
   child ConfigMap) needs to run that kind's own `KubeWriter`/`KubeClient`
   interpreter directly (see how `Kubernetes.Operator.OwnerReference`'s
   real-cluster validation does this) rather than getting it for free
-  through `compileControllerWithWriter`.
+  through `compileControllerWithWriter`. This is only true of *writes* —
+  the read side has `SecondaryWatch` (below), so watching a kind you don't
+  reconcile doesn't need this escape hatch.
 - No informer-level field/label selectors — a controller always
   lists/watches every object of its kind in scope and filters in the
   reconciler if needed.

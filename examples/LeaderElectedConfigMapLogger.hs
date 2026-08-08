@@ -68,6 +68,7 @@ main = do
           , csScope = scope
           , csWorkers = 4
           , csMaxRetries = 5
+          , csSecondaryWatches = []
           , csReconcile = onCached reconcileConfigMap
           }
 

@@ -1,3 +1,5 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
 -- | Owner references and garbage collection. Like
 -- "Kubernetes.Operator.Finalizer", this isn't a new effect — just pure
 -- helpers over 'OwnerReference' plus one small 'KubeWriter'-based one,
@@ -21,16 +23,19 @@ module Kubernetes.Operator.OwnerReference
   , setControllerReference
   , setOwnerReference
   , ensureControllerReference
+  , controllingOwnerKey
   ) where
 
 import Data.Aeson (ToJSON)
 import Data.List (find)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Effectful
 import Kubernetes.Operator.Client (KubeWriter, updateResource)
 import Kubernetes.Operator.Types (ReconcileError (..))
 import Kubernetes.Resource
-  ( ObjectMeta (omName, omOwnerReferences, omUid)
+  ( ObjectKey (..)
+  , ObjectMeta (omName, omNamespace, omOwnerReferences, omUid)
   , OwnerReference (..)
   , Resource (..)
   , apiVersionOf
@@ -143,6 +148,28 @@ addRef ref child = resourceSetMeta meta' child
   where
     meta = resourceMeta child
     meta' = meta {omOwnerReferences = ref : omOwnerReferences meta}
+
+-- | The key of the object that controls @meta@, filtered to controllers of
+-- kind @owner@ (matched on @apiVersion@\/@kind@ — the same identity
+-- 'hasOwnerReference' compares on, minus the uid, since a watch on the
+-- child has no independent way to confirm the uid without a Cache lookup of
+-- its own). 'Nothing' if there's no controlling owner reference at all, or
+-- its apiVersion\/kind don't name @owner@ (some other controller, or none
+-- yet).
+--
+-- This is the piece that turns "this child changed" into "go reconcile its
+-- parent": see 'Kubernetes.Operator.Controller.watchOwnedBy', which builds a
+-- 'Kubernetes.Operator.Controller.SecondaryWatch' out of it so a controller
+-- can watch a kind it creates/owns but doesn't itself reconcile, instead of
+-- polling for the child's server-side state. Owner references are always
+-- same-namespace, so the key reuses the child's own namespace.
+controllingOwnerKey :: forall owner. (Resource owner) => ObjectMeta -> Maybe ObjectKey
+controllingOwnerKey meta = do
+  ref <- findControllerRef meta
+  let gvk = resourceGVK (Proxy @owner)
+  if orApiVersion ref == apiVersionOf gvk && orKind ref == gvkKind gvk
+    then Just (ObjectKey (omNamespace meta) (orName ref))
+    else Nothing
 
 -- | Reconciler-friendly wrapper around 'setControllerReference': if
 -- @child@ doesn't yet carry @owner@'s controller reference, persists the

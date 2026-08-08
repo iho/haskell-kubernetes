@@ -134,6 +134,7 @@ main = do
           , crsScope = scope
           , crsWorkers = 2
           , crsMaxRetries = 5
+          , crsSecondaryWatches = []
           , crsReconcile = onCached reconcileBackup
           }
 

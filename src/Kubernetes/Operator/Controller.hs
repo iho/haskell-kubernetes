@@ -9,6 +9,8 @@ module Kubernetes.Operator.Controller
   , ControllerSpec (..)
   , ControllerSpecRW (..)
   , CompiledController (..)
+  , SecondaryWatch
+  , watchOwnedBy
   , workerLoop
   , workerLoopRW
   , compileController
@@ -18,6 +20,7 @@ module Kubernetes.Operator.Controller
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Exception as IOException
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Effectful
@@ -29,14 +32,15 @@ import Kubernetes.Operator.Cache (Cache, CacheStore, newCacheStore, runCacheIO)
 import Kubernetes.Operator.Client (KubeClient, KubeWriter, runKubeClientIO, runKubeWriterIO)
 import Kubernetes.Operator.Internal.Async (withAsyncs)
 import Kubernetes.Operator.Metrics (Metrics, MetricsRegistry, runMetricsPrometheus)
-import Kubernetes.Operator.Reflector (reflectorLoop)
+import Kubernetes.Operator.OwnerReference (controllingOwnerKey)
+import Kubernetes.Operator.Reflector (reflectorLoop, reflectorLoopFor)
 import Kubernetes.Operator.Types
   ( OperatorConfig
   , ReconcileError (..)
   , ReconcileResult (..)
   , Request (..)
   )
-import Kubernetes.Resource (ObjectKey, Resource, WatchScope, renderKey)
+import Kubernetes.Resource (ObjectKey, Resource (resourceMeta), WatchScope, renderKey)
 import Kubernetes.Operator.Workqueue
   ( Workqueue
   , WorkqueueHandle
@@ -82,6 +86,33 @@ type Ctx a es =
 -- read-only one.
 type CtxRW a es = (Ctx a es, KubeWriter a :> es)
 
+-- | A watch on a kind you create/own but don't reconcile — the alternative
+-- to periodic @requeueAfter@ polling for noticing a child's server-side
+-- state changing on its own (readiness, status subresources, anything the
+-- API server or another controller writes back). Compiled by
+-- 'compileController'\/'compileControllerWithWriter' into its own
+-- 'Kubernetes.Operator.Reflector.reflectorLoopFor' thread — its own
+-- 'Kubernetes.Operator.Cache.Cache' and
+-- 'Kubernetes.Operator.Client.KubeClient' interpreter for the child kind,
+-- following the same self-contained-stack pattern
+-- @examples/ServiceDeployer.hs@'s hand-rolled @ChildWrites@ already uses for
+-- cross-kind /writes/ — but every change routes, via the owner-key function
+-- below, onto the *primary* controller's Workqueue instead of one of its
+-- own. See
+-- 'watchOwnedBy' for the combinator that builds one from an owner kind.
+data SecondaryWatch
+  = forall b.
+    (Resource b, FromJSON b) =>
+    SecondaryWatch !WatchScope (b -> Maybe ObjectKey)
+
+-- | The common case: kind @b@'s controller reference names @owner@, so the
+-- key to enqueue on a change is just 'controllingOwnerKey' applied to that
+-- object's metadata. Both type parameters are fixed by 'TypeApplications' at
+-- the call site (e.g. @watchOwnedBy \@Service \@Deployment scope@), since
+-- neither can be inferred from 'WatchScope' alone.
+watchOwnedBy :: forall owner b. (Resource owner, Resource b, FromJSON b) => WatchScope -> SecondaryWatch
+watchOwnedBy scope = SecondaryWatch scope (controllingOwnerKey @owner . resourceMeta @b)
+
 -- | A reconciler plus the handful of knobs a controller needs around it.
 -- 'csReconcile' is rank-2 ('forall es. Ctx a es => ...') so it can be
 -- called from inside 'compileController' once the concrete @es@ (fixed by
@@ -99,6 +130,8 @@ data ControllerSpec a = ControllerSpec
   -- first) a failing key may take before the controller gives up on it
   -- permanently. Enforced in 'runOneReconcile' against the workqueue's
   -- per-key failure counter.
+  , csSecondaryWatches :: [SecondaryWatch]
+  -- ^ Usually @[]@; see 'SecondaryWatch'.
   , csReconcile :: forall es. Ctx a es => Request -> Eff es (Either ReconcileError ReconcileResult)
   }
 
@@ -113,6 +146,8 @@ data ControllerSpecRW a = ControllerSpecRW
   , crsWorkers :: !Int
   , crsMaxRetries :: !Int
   -- ^ As 'ControllerSpec.csMaxRetries'.
+  , crsSecondaryWatches :: [SecondaryWatch]
+  -- ^ As 'ControllerSpec.csSecondaryWatches'.
   , crsReconcile :: forall es. CtxRW a es => Request -> Eff es (Either ReconcileError ReconcileResult)
   }
 
@@ -215,16 +250,57 @@ workerLoopRW spec = loop
 -- 'Eff' environment onto their own thread concurrently, which is exactly
 -- what that strategy (and only that strategy) supports — see the
 -- accompanying design notes' concurrency section.
-runReflectorAndWorkers :: forall a es. (Resource a, FromJSON a, Ctx a es) => Eff es () -> Int -> Eff es ()
-runReflectorAndWorkers oneWorker workers =
+--
+-- @secondaryWatchActions@ (compiled by 'compileSecondaryWatchAction', one
+-- per 'SecondaryWatch') join the primary reflector as further "immortal"
+-- siblings: a plain @[IO ()]@ rather than something threaded through this
+-- same @es@, since each runs its own kind's fully separate
+-- 'Kubernetes.Operator.Cache.Cache'\/'Kubernetes.Operator.Client.KubeClient'
+-- interpreter stack (only the underlying 'WorkqueueHandle' value is
+-- actually shared — see 'compileSecondaryWatchAction'). Any one of them
+-- dying is exactly as fatal as the primary reflector dying, via
+-- 'Async.waitAnyCatch' over the whole group.
+runReflectorAndWorkers :: forall a es. (Resource a, FromJSON a, Ctx a es) => [IO ()] -> Eff es () -> Int -> Eff es ()
+runReflectorAndWorkers secondaryWatchActions oneWorker workers =
   withEffToIO (ConcUnlift Persistent Unlimited) $ \runInIO ->
-    withAsyncs (runInIO (reflectorLoop @a) : replicate workers (runInIO oneWorker)) $ \case
-      [] -> pure () -- unreachable: the reflector is always present
-      (reflAsync : workerAsyncs) -> do
-        outcome <- Async.race (Async.waitCatch reflAsync) (mapM Async.waitCatch workerAsyncs)
+    withAsyncs (runInIO (reflectorLoop @a) : secondaryWatchActions) $ \reflAsyncs ->
+      withAsyncs (replicate workers (runInIO oneWorker)) $ \workerAsyncs -> do
+        outcome <- Async.race (Async.waitAnyCatch reflAsyncs) (mapM Async.waitCatch workerAsyncs)
         case outcome of
-          Left reflResult -> either IOException.throwIO pure reflResult
+          Left (_, reflResult) -> either IOException.throwIO pure reflResult
           Right workerResults -> mapM_ (either IOException.throwIO pure) workerResults
+
+-- | Compiles one 'SecondaryWatch' into a self-contained, runnable action:
+-- its own 'Kubernetes.Client.newManagerFor' connection and
+-- 'Kubernetes.Operator.Cache.CacheStore' for the child kind @b@, but the
+-- *primary* controller's 'WorkqueueHandle' reused as-is (it's a plain value
+-- wrapping 'Control.Concurrent.STM.TVar's, so a second, independently-run
+-- 'Kubernetes.Operator.Workqueue.runWorkqueueIO' interpreter over the same
+-- handle operates on the same underlying queue — no new effect-row
+-- plumbing required to share it). This is what lets
+-- 'Kubernetes.Operator.Reflector.reflectorLoopFor' push a translated owner
+-- key straight onto the primary Workqueue from a completely different @es@.
+compileSecondaryWatchAction :: KubeConfig -> OperatorConfig -> WorkqueueHandle ObjectKey -> SecondaryWatch -> IO (IO ())
+compileSecondaryWatchAction kubeConfig opConfig wq (SecondaryWatch scope ownerKeyFor) = go ownerKeyFor
+  where
+    -- Named so the existential's hidden type (pinned by unifying @go@'s own
+    -- explicit @b@ against the caller's @ownerKeyFor :: b -> Maybe
+    -- ObjectKey@) has somewhere to be consistently applied — 'newCacheStore'
+    -- and 'runKubeClientIO' are otherwise too polymorphic for GHC to pin to
+    -- the same, unnamed skolem 'SecondaryWatch' pattern-matched out.
+    go :: forall b. (Resource b, FromJSON b) => (b -> Maybe ObjectKey) -> IO (IO ())
+    go keyFor = do
+      mgr <- newManagerFor kubeConfig
+      cacheStore <- newCacheStore :: IO (CacheStore b)
+      pure $
+        runEff
+          . runConcurrent
+          . runReader opConfig
+          . runLogIO
+          . runWorkqueueIO wq
+          . runCacheIO cacheStore
+          . runKubeClientIO @b mgr kubeConfig scope
+          $ reflectorLoopFor @b (maybeToList . keyFor)
 
 -- | Wire a 'ControllerSpec' up to a real, running (read-only) controller:
 -- its own 'Kubernetes.Operator.Cache.CacheStore', its own
@@ -246,8 +322,9 @@ compileController kubeConfig opConfig metrics spec = do
   mgr <- newManagerFor kubeConfig
   cacheStore <- newCacheStore :: IO (CacheStore a)
   wq <- newWorkqueue 1 60 :: IO (WorkqueueHandle ObjectKey) -- 1s base / 60s max reconcile backoff; not yet exposed via OperatorConfig
+  secondaryWatchActions <- mapM (compileSecondaryWatchAction kubeConfig opConfig wq) (csSecondaryWatches spec)
   let go :: forall es. (FromJSON a, Ctx a es) => Eff es ()
-      go = runReflectorAndWorkers @a (workerLoop spec) (csWorkers spec)
+      go = runReflectorAndWorkers @a secondaryWatchActions (workerLoop spec) (csWorkers spec)
 
       run =
         runEff
@@ -275,8 +352,9 @@ compileControllerWithWriter kubeConfig opConfig metrics spec = do
   mgr <- newManagerFor kubeConfig
   cacheStore <- newCacheStore :: IO (CacheStore a)
   wq <- newWorkqueue 1 60 :: IO (WorkqueueHandle ObjectKey)
+  secondaryWatchActions <- mapM (compileSecondaryWatchAction kubeConfig opConfig wq) (crsSecondaryWatches spec)
   let go :: forall es. (FromJSON a, ToJSON a, CtxRW a es) => Eff es ()
-      go = runReflectorAndWorkers @a (workerLoopRW spec) (crsWorkers spec)
+      go = runReflectorAndWorkers @a secondaryWatchActions (workerLoopRW spec) (crsWorkers spec)
 
       run =
         runEff

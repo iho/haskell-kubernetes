@@ -15,6 +15,7 @@
 -- nothing to dispatch on.
 module Kubernetes.Operator.Reflector
   ( reflectorLoop
+  , reflectorLoopFor
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -79,7 +80,24 @@ reflectorLoop
   :: forall a es
    . (Resource a, FromJSON a, KubeClient a :> es, Cache a :> es, Workqueue ObjectKey :> es, Log :> es, Reader OperatorConfig :> es, Concurrent :> es, IOE :> es)
   => Eff es ()
-reflectorLoop = resync
+reflectorLoop = reflectorLoopFor @a (pure . resourceKey)
+
+-- | As 'reflectorLoop', but with control over which key(s) a changed or
+-- deleted object of kind @a@ enqueues, instead of always its own
+-- 'resourceKey'. This is the hook a /secondary/ watch uses to translate a
+-- child object into its controlling owner's key — see
+-- 'Kubernetes.Operator.OwnerReference.controllingOwnerKey' for the typical
+-- @a -> ['ObjectKey']@ passed here, and
+-- 'Kubernetes.Operator.Controller.watchOwnedBy' for the combinator that
+-- builds one. The local Cache is still kept in sync for kind @a@ exactly as
+-- 'reflectorLoop' does; only what gets enqueued (and on whose Workqueue,
+-- determined by which interpreter @es@ carries) differs.
+reflectorLoopFor
+  :: forall a es
+   . (Resource a, FromJSON a, KubeClient a :> es, Cache a :> es, Workqueue ObjectKey :> es, Log :> es, Reader OperatorConfig :> es, Concurrent :> es, IOE :> es)
+  => (a -> [ObjectKey])
+  -> Eff es ()
+reflectorLoopFor keysFor = resync
   where
     resync :: Eff es ()
     resync = do
@@ -87,7 +105,7 @@ reflectorLoop = resync
       cacheReplace (lrItems list) (lrResourceVersion list)
       -- Prime the queue so a freshly (re)started controller reconciles
       -- every currently-known object once, not just future changes.
-      mapM_ (wqAdd . resourceKey) (lrItems list)
+      mapM_ (mapM_ wqAdd . keysFor) (lrItems list)
       watch (lrResourceVersion list)
 
     -- Closes the handle (via 'finally') before deciding whether to resync,
@@ -140,7 +158,7 @@ reflectorLoop = resync
       Bookmark -> pure ()
       Deleted -> case parseMaybe (parseJSON @a) (weObject evt) of
         Nothing -> logWarn "watch: failed to decode DELETED object; skipping"
-        Just obj -> cacheDelete @a (resourceKey obj) >> wqAdd (resourceKey obj)
+        Just obj -> cacheDelete @a (resourceKey obj) >> mapM_ wqAdd (keysFor obj)
       _ -> case parseMaybe (parseJSON @a) (weObject evt) of
         Nothing -> logWarn "watch: failed to decode object; skipping"
-        Just obj -> cacheUpsert obj >> wqAdd (resourceKey obj)
+        Just obj -> cacheUpsert obj >> mapM_ wqAdd (keysFor obj)

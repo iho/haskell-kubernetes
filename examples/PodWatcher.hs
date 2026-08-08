@@ -57,6 +57,7 @@ main = do
           , csScope = scope
           , csWorkers = 2
           , csMaxRetries = 3
+          , csSecondaryWatches = []
           , csReconcile = onCached reconcilePod
           }
 

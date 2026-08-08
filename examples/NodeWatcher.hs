@@ -83,6 +83,7 @@ main = do
           , csScope = WatchAllNamespaces
           , csWorkers = 2
           , csMaxRetries = 3
+          , csSecondaryWatches = []
           , csReconcile = onCached reconcileNode
           }
 

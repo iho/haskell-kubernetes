@@ -18,6 +18,16 @@
 -- (CR status) go through the framework's 'updateStatus'; child writes go
 -- through the hand-rolled 'Deployment' stack.
 --
+-- The controller only ever /watches/ @Service@ CRs — a Deployment's
+-- readiness can change (a Pod finishes starting, a rollout progresses) with
+-- no corresponding change to the CR at all. Rather than polling for that
+-- with a periodic 'requeueAfter', 'watchOwnedBy' wires a
+-- 'SecondaryWatch' on 'Deployment': every add\/update\/delete the API
+-- server reports translates (via its @ownerReferences@) straight to the
+-- owning @Service@'s key and lands on this controller's own Workqueue, so a
+-- Deployment's status change re-triggers the same reconcile a change to the
+-- CR itself would.
+--
 -- > cabal run service-deployer
 module Main (main) where
 
@@ -210,15 +220,14 @@ reconcileService child (Request key) mSvc = do
               requeueAfter 1
           | otherwise -> do
               -- In sync spec-wise. Report readiness into the CR's status.
-              -- We only watch Service CRs, NOT the child Deployment, so the
-              -- Deployment's readiness can change with no watch event to
-              -- re-trigger us. Requeue on a short timer while converging,
-              -- and on a longer poll interval once in sync, so the operator
-              -- keeps the child under observation despite not watching it.
+              -- The module's 'SecondaryWatch' on Deployment means a change
+              -- to the child's readiness re-triggers this reconcile on its
+              -- own, so once the status matches there's nothing to wait on
+              -- — no periodic re-poll needed.
               let ready = fromMaybe 0 (depReadyReplicas dep)
                   desiredStatus = ServiceStatus ready
               if serviceStatus svc == Just desiredStatus
-                then requeueAfter 10 -- in sync: periodic re-poll
+                then done
                 else do
                   _ <- updateStatus (svc {serviceStatus = Just desiredStatus})
                   logInfo (renderKey key <> " readyReplicas=" <> T.pack (show ready))
@@ -240,6 +249,7 @@ main = do
           , crsScope = scope
           , crsWorkers = 2
           , crsMaxRetries = 5
+          , crsSecondaryWatches = [watchOwnedBy @Service @Deployment scope]
           , crsReconcile = onCached (reconcileService child)
           }
 

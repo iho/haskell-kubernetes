@@ -133,6 +133,7 @@ pipelineScenario = do
             , csScope = WatchNamespace "default"
             , csWorkers = 2
             , csMaxRetries = 3
+            , csSecondaryWatches = []
             , csReconcile = recordingReconciler seenRef
             }
     metrics <- newMetricsRegistry
@@ -331,6 +332,149 @@ ownerReferenceScenario = do
     isLeftReconcile _ = False
 
 -- --------------------------------------------------------------------------
+-- Scenario 4: 'SecondaryWatch' — a controller reconciling 'Owner' that
+-- never receives a single watch event on 'Owner' itself (its watch stream
+-- ends immediately, forever) still gets re-triggered when a 'Child' it
+-- doesn't reconcile changes, purely via 'watchOwnedBy' translating the
+-- child's @ownerReferences@ into the owner's key. If that translation
+-- didn't work, the owner would only ever be reconciled once, from the
+-- initial LIST-priming pass.
+-- --------------------------------------------------------------------------
+
+newtype Owner = Owner {ownerMeta :: ObjectMeta}
+
+instance FromJSON Owner where
+  parseJSON = withObject "Owner" $ \o -> Owner <$> o .: "metadata"
+
+instance Resource Owner where
+  resourceGVK _ = GVK "" "v1" "Owner"
+  resourceScope _ = Namespaced
+  resourcePlural _ = "owners"
+  resourceMeta = ownerMeta
+  resourceSetMeta m x = x {ownerMeta = m}
+
+newtype Child = Child {childMeta :: ObjectMeta}
+
+instance FromJSON Child where
+  parseJSON = withObject "Child" $ \o -> Child <$> o .: "metadata"
+
+instance Resource Child where
+  resourceGVK _ = GVK "" "v1" "Child"
+  resourceScope _ = Namespaced
+  resourcePlural _ = "children"
+  resourceMeta = childMeta
+  resourceSetMeta m x = x {childMeta = m}
+
+recordingOwnerReconciler
+  :: TVar [Seen]
+  -> (forall es. (Ctx Owner es) => Request -> Eff es (Either ReconcileError ReconcileResult))
+recordingOwnerReconciler seenRef (Request key) = do
+  mObj <- cacheGet @Owner key
+  let event = case mObj of
+        Nothing -> SeenAbsent (renderKey key)
+        Just obj -> SeenPresent (renderKey key) (fromMaybe "?" (omResourceVersion (ownerMeta obj)))
+  liftIO (atomically (modifyTVar' seenRef (event :)))
+  pure (Right Done)
+
+ownerRefJson :: Text -> Aeson.Value
+ownerRefJson name =
+  object
+    [ "apiVersion" .= ("v1" :: Text)
+    , "kind" .= ("Owner" :: Text)
+    , "name" .= name
+    , "uid" .= ("owner-a-uid" :: Text)
+    , "controller" .= True
+    ]
+
+childJson :: Text -> Text -> Aeson.Value
+childJson name rv =
+  object
+    [ "metadata"
+        .= object
+          [ "name" .= name
+          , "namespace" .= ("default" :: Text)
+          , "resourceVersion" .= rv
+          , "ownerReferences" .= [ownerRefJson "owner-a"]
+          ]
+    ]
+
+secondaryWatchServer :: Wai.Application
+secondaryWatchServer req respond
+  | isChildPath, isWatchRequest req =
+      respond $
+        Wai.responseStream HTTP.status200 [("Content-Type", "application/json")] $ \write flush -> do
+          -- Give the Owner LIST-priming pass a head start, so the two
+          -- reconciles of "default/owner-a" (priming, then this) are
+          -- clearly ordered in the recorded log.
+          threadDelay 200000
+          sendJson write (watchEvent "ADDED" (childJson "child-a" "10"))
+          flush
+  | isChildPath =
+      respond (Wai.responseLBS HTTP.status200 [("Content-Type", "application/json")] (Aeson.encode childListBody))
+  | isOwnerPath, isWatchRequest req =
+      -- Ends immediately, with no events, and stays ended: if the Owner
+      -- gets reconciled a second time, it can only be via the SecondaryWatch.
+      respond (Wai.responseStream HTTP.status200 [("Content-Type", "application/json")] (\_write _flush -> pure ()))
+  | isOwnerPath =
+      respond (Wai.responseLBS HTTP.status200 [("Content-Type", "application/json")] (Aeson.encode ownerListBody))
+  | otherwise = respond (Wai.responseLBS HTTP.status404 [] "unused by this scenario")
+  where
+    isChildPath = "children" `elem` Wai.pathInfo req
+    isOwnerPath = "owners" `elem` Wai.pathInfo req
+    ownerListBody =
+      object
+        [ "metadata" .= object ["resourceVersion" .= ("1" :: Text)]
+        , "items" .= [jsonObj "owner-a" "1"]
+        ]
+    childListBody =
+      object
+        [ "metadata" .= object ["resourceVersion" .= ("1" :: Text)]
+        , "items" .= ([] :: [Aeson.Value])
+        ]
+
+secondaryWatchScenario :: IO Bool
+secondaryWatchScenario = do
+  seenRef <- newTVarIO []
+  Warp.testWithApplication (pure secondaryWatchServer) $ \port -> do
+    let cfg =
+          KubeConfig
+            { kcBaseUrl = "http://127.0.0.1:" <> T.pack (show port)
+            , kcToken = Nothing
+            , kcCaFile = Nothing
+            , kcInsecureSkipTLSVerify = False
+            , kcNamespace = NS "default"
+            }
+        scope = WatchNamespace "default"
+        spec :: ControllerSpec Owner
+        spec =
+          ControllerSpec
+            { csName = "owner-controller"
+            , csScope = scope
+            , csWorkers = 2
+            , csMaxRetries = 3
+            , csSecondaryWatches = [watchOwnedBy @Owner @Child scope]
+            , csReconcile = recordingOwnerReconciler seenRef
+            }
+    metrics <- newMetricsRegistry
+    controller <- compileController cfg defaultOperatorConfig metrics spec
+    runAsync <- Async.async (ccRun controller)
+    -- Long enough to see both the initial priming reconcile and the one
+    -- triggered by the Child's ADDED event, short of the Reflector's own
+    -- resync-backoff (2s) so a periodic re-LIST can't also explain a second
+    -- reconcile.
+    threadDelay 800000
+    ccShutdown controller
+    Async.wait runAsync
+
+  seen <- reverse <$> readTVarIO seenRef
+  let ownerSeenCount = length (filter (== SeenPresent "default/owner-a" "1") seen)
+  reportExpectations
+    "secondary-watch"
+    [ ("owner-a reconciled from the initial LIST, then again via the Child's SecondaryWatch", ownerSeenCount >= 2)
+    ]
+    (show seen)
+
+-- --------------------------------------------------------------------------
 
 reportExpectations :: String -> [(String, Bool)] -> String -> IO Bool
 reportExpectations scenario expectations context = do
@@ -355,6 +499,10 @@ main = do
     ownerReferenceScenario `catch` \(e :: SomeException) -> do
       hPutStrLn stderr ("FAILED [owner-reference]: scenario crashed: " <> show e)
       pure False
-  if r1 && r2 && r3
+  r4 <-
+    secondaryWatchScenario `catch` \(e :: SomeException) -> do
+      hPutStrLn stderr ("FAILED [secondary-watch]: scenario crashed: " <> show e)
+      pure False
+  if r1 && r2 && r3 && r4
     then putStrLn "ALL SCENARIOS PASSED"
     else exitFailure
