@@ -26,6 +26,7 @@ module Kubernetes.Operator.Workqueue
   , wqDone
   , wqShutDown
   , wqLen
+  , wqFailureCount
   , WorkqueueHandle
   , newWorkqueue
   , runWorkqueueIO
@@ -60,6 +61,11 @@ data Workqueue k :: Effect where
   WqDone :: k -> Workqueue k m ()
   WqShutDown :: Workqueue k m ()
   WqLen :: Workqueue k m Int
+  -- | The current consecutive-failure count for a key, as tracked by
+  -- 'wqAddRateLimited' and reset by 'wqForget'. Exposed so a worker can
+  -- give up on a key once it exceeds its controller's retry budget,
+  -- instead of retrying forever.
+  WqFailureCount :: k -> Workqueue k m Int
 
 type instance DispatchOf (Workqueue k) = Dynamic
 
@@ -86,6 +92,9 @@ wqShutDown = send (WqShutDown :: Workqueue k (Eff es) ())
 
 wqLen :: forall k es. (Workqueue k :> es) => Eff es Int
 wqLen = send (WqLen :: Workqueue k (Eff es) Int)
+
+wqFailureCount :: forall k es. (Workqueue k :> es) => k -> Eff es Int
+wqFailureCount = send . WqFailureCount
 
 data WorkqueueHandle k = WorkqueueHandle
   { whQueue :: !(TVar (Seq k))
@@ -161,6 +170,7 @@ runWorkqueueIO wq = interpret $ \_ -> \case
       enqueue k
   WqShutDown -> liftIO (shutdownWorkqueueIO wq)
   WqLen -> liftIO (Seq.length <$> readTVarIO (whQueue wq))
+  WqFailureCount k -> liftIO (Map.findWithDefault 0 k <$> readTVarIO (whFailures wq))
   where
     addNow :: k -> IO ()
     addNow k = atomically $ do

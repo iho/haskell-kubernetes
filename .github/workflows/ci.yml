@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ghc: ["9.10"]
+        cabal: ["latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: ${{ matrix.cabal }}
+
+      - name: Cache dist-newstyle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('kube-hs.cabal') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.ghc }}-
+
+      - name: Update package index
+        run: cabal update
+
+      - name: Build all targets
+        run: cabal build all
+
+      - name: Run the test suite
+        run: cabal test --test-show-details=direct

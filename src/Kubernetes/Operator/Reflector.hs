@@ -20,8 +20,13 @@ module Kubernetes.Operator.Reflector
 import Control.Concurrent (threadDelay)
 import Data.Aeson (FromJSON, parseJSON)
 import Data.Aeson.Types (parseMaybe)
+import Data.Text (Text)
+import Data.Time (NominalDiffTime)
 import Effectful
+import Effectful.Concurrent (Concurrent)
+import Effectful.Concurrent.Async (race)
 import Effectful.Exception (finally)
+import Effectful.Reader.Static (Reader, asks)
 import Kubernetes.Client (Log, logInfo, logWarn)
 import Kubernetes.Operator.Cache (Cache, cacheDelete, cacheReplace, cacheUpsert)
 import Kubernetes.Operator.Client
@@ -35,9 +40,9 @@ import Kubernetes.Operator.Client
   , nextEvent
   , openWatch
   )
+import Kubernetes.Operator.Types (OperatorConfig (..))
 import Kubernetes.Operator.Workqueue (Workqueue, wqAdd)
 import Kubernetes.Resource (ObjectKey, Resource (resourceKey))
-import Data.Text (Text)
 
 -- | How long to wait before re-LISTing after the watch stream ends or
 -- reports an error, so a persistently failing API server isn't hammered
@@ -48,13 +53,21 @@ import Data.Text (Text)
 resyncBackoffMicros :: Int
 resyncBackoffMicros = 2 * 1000 * 1000
 
+microsFor :: NominalDiffTime -> Int
+microsFor d = max 0 (round (realToFrac d * 1000000 :: Double))
+
 -- | Runs forever: LIST → replace the Cache wholesale → watch from that
 -- LIST's resourceVersion, applying each event to the Cache and enqueuing
 -- its key. On watch end (server closed the stream, e.g. after
 -- @timeoutSeconds@) or an in-stream @ERROR@ event (typically
--- "resourceVersion too old" \/ 410 Gone), falls back to a fresh LIST rather
--- than trying to resume — the resync loop the base client's Haddock
--- explicitly left as future work.
+-- "resourceVersion too old" / 410 Gone), falls back to a fresh LIST rather
+-- than trying to resume. The watch is additionally time-limited to
+-- 'Kubernetes.Operator.Types.ocResyncPeriod': if that much wall-clock time
+-- passes with no terminating event, the reflector re-LISTs anyway, so a
+-- watch notification the client silently dropped is healed by the next
+-- periodic resync even though the stream itself never ended. This is what
+-- makes 'Kubernetes.Operator.Types.ocResyncPeriod' actually meaningful —
+-- previously it was declared but never consulted.
 --
 -- Meant to run as its own thread (see
 -- 'Kubernetes.Operator.Controller.compileController'); stopped by
@@ -64,7 +77,7 @@ resyncBackoffMicros = 2 * 1000 * 1000
 -- same pattern already exercised by the base client's Ctrl-C handling.
 reflectorLoop
   :: forall a es
-   . (Resource a, FromJSON a, KubeClient a :> es, Cache a :> es, Workqueue ObjectKey :> es, Log :> es, IOE :> es)
+   . (Resource a, FromJSON a, KubeClient a :> es, Cache a :> es, Workqueue ObjectKey :> es, Log :> es, Reader OperatorConfig :> es, Concurrent :> es, IOE :> es)
   => Eff es ()
 reflectorLoop = resync
   where
@@ -82,13 +95,26 @@ reflectorLoop = resync
     watch :: Text -> Eff es ()
     watch rv = do
       wh <- openWatch rv
-      needsResync <- watchLoop wh `finally` closeWatch wh
+      needsResync <- watchLoopPeriod wh `finally` closeWatch wh
       if needsResync
         then do
           liftIO (threadDelay resyncBackoffMicros)
           resync
         else pure ()
 
+    -- Watch for up to 'ocResyncPeriod' of wall-clock time before forcing a
+    -- resync. 'True' means the caller should close up and re-LIST — either
+    -- because the stream ended (server close or @ERROR@ event) or because
+    -- the resync period elapsed while we were still watching.
+    watchLoopPeriod :: WatchHandle a -> Eff es Bool
+    watchLoopPeriod wh = do
+      periodMicros <- asks (microsFor . ocResyncPeriod)
+      res <- race (watchLoop wh) (liftIO (threadDelay periodMicros))
+      case res of
+        Left stopNow -> pure stopNow
+        Right () -> do
+          logInfo "resync period elapsed; forcing re-LIST"
+          pure True
     -- 'True' means the caller should close up and re-LIST.
     watchLoop :: WatchHandle a -> Eff es Bool
     watchLoop wh = do

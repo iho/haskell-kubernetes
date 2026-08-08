@@ -7,7 +7,8 @@ A Haskell **library** for writing Kubernetes operators — a typed,
 Everything you actually depend on lives under `src/Kubernetes/`, exposed as
 one library target (`kube-hs`) in `kube-hs.cabal`. The `executable` stanzas
 in that same file (`configmap-logger`, `website-operator`,
-`leader-election-demo`, `website-webhook`, `crd-codegen`, ...) are not the
+`leader-election-demo`, `website-webhook`, `node-watcher`,
+`configmap-backup`, `service-deployer`, `crd-codegen`, ...) are not the
 product — they're runnable examples under `examples/`, each demonstrating
 one feature of the library end to end, kept in the same repo (and same
 `cabal test`/CI) so they can't silently drift out of date. A real operator
@@ -28,7 +29,10 @@ cluster — not just unit-tested against fakes.
   `client-go` is built on: a local, thread-safe read cache
   (`Kubernetes.Operator.Cache`), a rate-limited deduplicating work queue
   (`Kubernetes.Operator.Workqueue`), and the LIST-then-watch loop that
-  keeps both in sync and auto-resyncs on `410 Gone` (`Kubernetes.Operator.Reflector`).
+  keeps both in sync — auto-resyncing on `410 Gone`, and re-LISTing on a
+  fixed `ocResyncPeriod` so a watch notification the client silently
+  dropped is healed even when the stream never ends
+  (`Kubernetes.Operator.Reflector`).
 - **Controller + Manager**: wire a reconciler to a resource kind
   (`Kubernetes.Operator.Controller`), then run one or many controllers —
   for different resource kinds, side by side — with graceful
@@ -180,11 +184,14 @@ Each is a complete `main`, runnable with `cabal run <name>` against
 |---|---|
 | `kube-hs` | The original minimal Pod list+watch client (`Kubernetes.Client` directly, no operator framework). |
 | `pod-watcher` | The same list+watch behavior rebuilt on the generic `Resource`/`Ctx` framework, read-only. |
+| `node-watcher` | A read-only operator for a **cluster-scoped** built-in kind (Node) — where `resourceScope _ = ClusterScoped` and `WatchScope` is ignored. |
 | `configmap-logger` | The quickstart above: one read-only `Controller`, metrics endpoint. |
 | `leader-elected-configmap-logger` | The same reconciler wrapped in `runWithLeaderElection` — run two copies with different `IDENTITY` env vars to watch them hand off. |
 | `leader-election-demo` | Leader election in isolation, no controller — just the Lease handoff. |
+| `configmap-backup` | The minimal **write** operator: `compileControllerWithWriter`, `createResource`/`updateResource`, owner references / garbage collection against a built-in kind. |
 | `website-operator` | The comprehensive example: a generated CRD type, finalizers, status subresource writes, metrics — via `ControllerSpecRW`/`compileControllerWithWriter`. |
 | `website-webhook` | Validating + mutating admission webhooks for the same CRD, served over TLS. |
+| `service-deployer` | A **cross-kind** operator: a CRD reconciler that creates and owns a Deployment (the documented hand-rolled-interpreter escape hatch). |
 | `crd-codegen` | The codegen CLI itself (see below). |
 
 ## Generating Haskell types from a CRD
@@ -201,6 +208,10 @@ type per object-shaped schema node, `FromJSON`/`ToJSON` instances, and a
 this way. The output is **not** regenerated automatically and is meant to
 be hand-edited afterwards (add derived instances, helper functions, etc.);
 if you do regenerate, diff first.
+
+The `service-deployer` example's CRD type is instead hand-written (no
+codegen) and lives inline in the example; a matching manifest to install it
+against a cluster is `examples/crds/service-crd.yaml`.
 
 ## Admission webhooks
 
@@ -301,16 +312,15 @@ cabal test
 
 The test suite (`test/Spec.hs`) runs entirely against fake HTTP servers on
 ephemeral ports (`Network.Wai.Handler.Warp`) — no external cluster or fixed
-port required, safe to run concurrently and in CI. Every feature above was
-additionally validated by hand against a real `kind` cluster during
-development; that validation isn't automated here (it needs a running
-cluster, `kubectl`, and Docker), but nothing shipped without it.
+port required, safe to run concurrently and in CI. GitHub Actions runs
+`cabal build all` + `cabal test` on GHC 9.10 for every push and pull request
+(`.github/workflows/ci.yml`). Every feature above was additionally validated
+by hand against a real `kind` cluster during development; that validation
+isn't automated (it needs a running cluster, `kubectl`, and Docker), but
+nothing shipped without it.
 
 ## Known limitations (intentionally out of scope, for now)
 
-- `csMaxRetries`/`crsMaxRetries` on a `ControllerSpec(RW)` is currently
-  advisory — the Workqueue retries a failing key with exponential backoff
-  indefinitely rather than giving up after N attempts.
 - Writes are full-object PUT with optimistic-concurrency conflict
   detection (via `resourceVersion`), not Server-Side Apply — a reconciler
   that only wants to own a few fields of an object shared with other

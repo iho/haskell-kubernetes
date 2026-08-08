@@ -211,6 +211,51 @@ executable pod-watcher
       , aeson
       , text
 
+executable node-watcher
+    import:              warnings
+    main-is:             NodeWatcher.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
+executable configmap-backup
+    import:              warnings
+    main-is:             ConfigMapBackup.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
+executable service-deployer
+    import:              warnings
+    main-is:             ServiceDeployer.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
 executable crd-codegen
     import:              warnings
     main-is:             Main.hs

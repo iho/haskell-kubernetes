@@ -21,6 +21,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Effectful
+import Effectful.Concurrent (Concurrent, runConcurrent)
 import Effectful.Exception (SomeException, try)
 import Effectful.Reader.Static (Reader, runReader)
 import Kubernetes.Client (KubeConfig, Log, logErr, newManagerFor, runLogIO)
@@ -48,6 +49,7 @@ import Kubernetes.Operator.Workqueue
   , wqDone
   , wqForget
   , wqGet
+  , wqFailureCount
   )
 
 -- | The capability row a reconciler needs — the concrete stand-in for
@@ -67,6 +69,7 @@ type Ctx a es =
   , Metrics :> es
   , Log :> es
   , Reader OperatorConfig :> es
+  , Concurrent :> es
   , IOE :> es
   )
 
@@ -92,8 +95,10 @@ data ControllerSpec a = ControllerSpec
   -- Haddock for why this isn't folded into 'KubeConfig'.
   , csWorkers :: !Int
   , csMaxRetries :: !Int
-  -- ^ Currently advisory (see 'workerLoop' Haddock); wiring this into a
-  -- give-up-after-N-failures policy is a small addition to 'handleOutcome'.
+  -- ^ How many consecutive 'TransientError' attempts (including the
+  -- first) a failing key may take before the controller gives up on it
+  -- permanently. Enforced in 'runOneReconcile' against the workqueue's
+  -- per-key failure counter.
   , csReconcile :: forall es. Ctx a es => Request -> Eff es (Either ReconcileError ReconcileResult)
   }
 
@@ -107,6 +112,7 @@ data ControllerSpecRW a = ControllerSpecRW
   , crsScope :: !WatchScope
   , crsWorkers :: !Int
   , crsMaxRetries :: !Int
+  -- ^ As 'ControllerSpec.csMaxRetries'.
   , crsReconcile :: forall es. CtxRW a es => Request -> Eff es (Either ReconcileError ReconcileResult)
   }
 
@@ -125,12 +131,17 @@ data CompiledController = CompiledController
 -- regardless of whether it can write. Exceptions escaping the reconcile
 -- action are caught here and turned into a 'TransientError' rather than
 -- killing the worker thread — see 'workerLoop''s Haddock for why.
+-- @maxRetries@ is the controller's retry budget: once a key's
+-- consecutive-failure count (tracked by the workqueue's 'wqAddRateLimited')
+-- reaches it, a further 'TransientError' is treated as permanent rather
+-- than retried indefinitely.
 runOneReconcile
   :: (Workqueue ObjectKey :> es, Log :> es, IOE :> es)
-  => ObjectKey
+  => Int
+  -> ObjectKey
   -> Eff es (Either ReconcileError ReconcileResult)
   -> Eff es ()
-runOneReconcile key action = do
+runOneReconcile maxRetries key action = do
   outcome <- do
     r <- try action
     pure $ case r of
@@ -144,8 +155,14 @@ runOneReconcile key action = do
       logErr ("reconcile " <> renderKey key <> " permanently failed: " <> msg)
       wqForget key >> wqDone key
     Left (TransientError msg) -> do
-      logErr ("reconcile " <> renderKey key <> " failed, retrying: " <> msg)
-      wqDone key >> wqAddRateLimited key
+      failures <- wqFailureCount key
+      if failures + 1 >= maxRetries
+        then do
+          logErr ("reconcile " <> renderKey key <> " gave up after " <> T.pack (show (failures + 1)) <> " attempts: " <> msg)
+          wqForget key >> wqDone key
+        else do
+          logErr ("reconcile " <> renderKey key <> " failed, retrying: " <> msg)
+          wqDone key >> wqAddRateLimited key
 
 -- | One worker: pull a key, reconcile it, act on the result, repeat until
 -- the workqueue is shut down and drained. This is the part of a Controller
@@ -168,7 +185,7 @@ workerLoop spec = loop
       mKey <- wqGet
       case mKey of
         Nothing -> pure () -- queue shut down and drained: exit cleanly
-        Just key -> runOneReconcile key (csReconcile spec (Request key)) >> loop
+        Just key -> runOneReconcile (csMaxRetries spec) key (csReconcile spec (Request key)) >> loop
 
 -- | As 'workerLoop', for a 'ControllerSpecRW'.
 workerLoopRW :: forall a es. (CtxRW a es) => ControllerSpecRW a -> Eff es ()
@@ -178,7 +195,7 @@ workerLoopRW spec = loop
       mKey <- wqGet
       case mKey of
         Nothing -> pure ()
-        Just key -> runOneReconcile key (crsReconcile spec (Request key)) >> loop
+        Just key -> runOneReconcile (crsMaxRetries spec) key (crsReconcile spec (Request key)) >> loop
 
 -- | The reflector + worker-pool supervision shared by 'compileController'
 -- and 'compileControllerWithWriter': run every worker and the reflector as
@@ -234,6 +251,7 @@ compileController kubeConfig opConfig metrics spec = do
 
       run =
         runEff
+          . runConcurrent
           . runReader opConfig
           . runLogIO
           . runMetricsPrometheus metrics
@@ -262,6 +280,7 @@ compileControllerWithWriter kubeConfig opConfig metrics spec = do
 
       run =
         runEff
+          . runConcurrent
           . runReader opConfig
           . runLogIO
           . runMetricsPrometheus metrics
