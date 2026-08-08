@@ -157,6 +157,33 @@ executable leader-election-demo
       , kube-hs
       , text
 
+executable leader-elected-configmap-logger
+    import:              warnings
+    main-is:             LeaderElectedConfigMapLogger.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , containers
+      , text
+
+executable pod-watcher
+    import:              warnings
+    main-is:             PodWatcher.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
+      , effectful
+      , aeson
+      , text
+
 executable crd-codegen
     import:              warnings
     main-is:             Main.hs
