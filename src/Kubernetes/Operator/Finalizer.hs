@@ -5,7 +5,8 @@
 --
 -- 1. On every reconcile of a live object, call 'ensureFinalizer' first. If
 --    it wasn't already present, it just got added (persisted with a PUT)
---    and the object you're holding is now stale — bail out and requeue.
+--    and the object you're holding is now stale — stop here (just 'done';
+--    no need to schedule your own retry, see 'ensureFinalizer''s Haddock).
 -- 2. If 'isBeingDeleted', skip your normal logic entirely and call
 --    'finalizeAndRemove' with your cleanup action instead.
 --
@@ -38,11 +39,15 @@ hasFinalizer name obj = name `elem` omFinalizers (resourceMeta obj)
 
 -- | Call at the top of a reconciler for an object that is /not/ being
 -- deleted. Adds the given finalizer name and persists the change if it
--- isn't there yet, returning 'True' — the caller should treat this as
--- "stop here and requeue immediately"; the freshly-returned object from
--- the PUT (with the new @resourceVersion@) is what the next reconcile will
--- see via the Cache once the Reflector picks up the resulting watch event.
--- Returns 'False' with no side effect if the finalizer was already present.
+-- isn't there yet, returning 'True' — the caller should stop here (e.g.
+-- 'Kubernetes.Operator.Types.done'), not keep going with the in-hand
+-- object, since it's now stale. No need to schedule an explicit retry
+-- either: the PUT's resulting @MODIFIED@ watch event is what the Reflector
+-- feeds back into the Cache and Workqueue, so this key naturally comes back
+-- around on its own once that lands — requeuing by hand as well would just
+-- race it, adding a redundant reconcile in the (typical) case where the
+-- watch event wins. Returns 'False' with no side effect if the finalizer
+-- was already present.
 ensureFinalizer :: (Resource a, ToJSON a, KubeWriter a :> es) => Text -> a -> Eff es Bool
 ensureFinalizer name obj
   | hasFinalizer name obj = pure False

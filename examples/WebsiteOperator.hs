@@ -67,12 +67,15 @@ reconcileWebsite (Request key) mSite = do
       pure (fmap (const Done) cleaned)
 
     -- Not being deleted, but hasn't got our finalizer yet: add it and
-    -- persist. The write just changed resourceVersion, so the object
-    -- we're holding is now stale — come back shortly rather than
-    -- re-reading a Cache that hasn't caught up with our own write yet.
+    -- persist, then stop. No need to requeue by hand to "wait for the
+    -- cache": the PUT's resulting MODIFIED event is what the Reflector
+    -- feeds back into the Cache and Workqueue, so this key naturally comes
+    -- back around once that's landed — an artificial timer here would just
+    -- race it, adding a redundant extra reconcile in the common case where
+    -- the watch event (typically tens of ms) beats the timer.
     addFinalizer site = do
       _ <- ensureFinalizer websiteFinalizer site
-      requeueAfter 0.5
+      done
 
     -- Steady state: compute what status should be and write it if (and
     -- only if) it's actually different — see 'reconcileWebsite''s Haddock
