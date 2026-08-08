@@ -58,6 +58,7 @@ library
     import:             warnings
     exposed-modules:    Kubernetes.Client
                        , Kubernetes.Resource
+                       , Kubernetes.Resource.TH
                        , Kubernetes.Operator
                        , Kubernetes.Operator.Types
                        , Kubernetes.Operator.Cache
@@ -79,10 +80,11 @@ library
     default-extensions: OverloadedStrings
                        , TypeFamilies
     build-depends:
-        base             ^>=4.20.2.0
-      , effectful        >=2.3 && <2.6
-      , aeson            >=2.0
-      , bytestring
+        , base             ^>=4.20.2.0
+        , effectful        >=2.3 && <2.6
+        , aeson            >=2.0
+        , template-haskell >=2.19
+        , bytestring
       , base64-bytestring
       , text
       , time

@@ -4,7 +4,12 @@
 module Kubernetes.Operator.Types
   ( Request (..)
   , ReconcileResult (..)
+  , done
+  , requeueAfter
+  , requeueNow
   , ReconcileError (..)
+  , transientError
+  , permanentError
   , OperatorConfig (..)
   , defaultOperatorConfig
   ) where
@@ -53,6 +58,34 @@ data ReconcileError
     -- Logged and dropped; a future spec change will re-trigger reconciliation.
     PermanentError !Text
   deriving (Show, Eq)
+
+-- ---------------------------------------------------------------------------
+-- Small constructors, so a reconciler reads as plain prose rather than
+-- repeating the full @Right Done@ / @Left (TransientError msg)@ spelling.
+-- ---------------------------------------------------------------------------
+
+-- | @'pure' ('Right' 'Done')@ — nothing more to do until the next watch
+-- event or resync. The overwhelmingly common case in a reconciler's happy
+-- path.
+done :: (Applicative f) => f (Either ReconcileError ReconcileResult)
+done = pure (Right Done)
+
+-- | @'pure' ('Right' ('RequeueAfter' d))@ — try again after a delay.
+requeueAfter :: (Applicative f) => NominalDiffTime -> f (Either ReconcileError ReconcileResult)
+requeueAfter d = pure (Right (RequeueAfter d))
+
+-- | @'pure' ('Right' 'RequeueImmediately')@ — try again as soon as a worker
+-- is free.
+requeueNow :: (Applicative f) => f (Either ReconcileError ReconcileResult)
+requeueNow = pure (Right RequeueImmediately)
+
+-- | @'Left' ('TransientError' msg)@ — failed, but might succeed if retried.
+transientError :: (Applicative f) => Text -> f (Either ReconcileError ReconcileResult)
+transientError = pure . Left . TransientError
+
+-- | @'Left' ('PermanentError' msg)@ — retrying would never help.
+permanentError :: (Applicative f) => Text -> f (Either ReconcileError ReconcileResult)
+permanentError = pure . Left . PermanentError
 
 -- | Static, rarely-changing configuration threaded via effectful's static
 -- 'Effectful.Reader.Static.Reader' effect rather than a bespoke effect of

@@ -127,6 +127,41 @@ object back (status updates, finalizers, owner references)? Use
 `ControllerSpecRW`/`compileControllerWithWriter` instead — see
 `examples/WebsiteOperator.hs`.
 
+## Cutting the per-kind boilerplate
+
+A `Resource` instance is only five methods, but they're the same five every
+time. Two small helpers remove most of the noise:
+
+- **`deriveResource`** (Template Haskell, `Kubernetes.Resource.TH`,
+  re-exported by `Kubernetes.Operator`): generates the whole instance from a
+  single call.
+
+  ```haskell
+  {-# LANGUAGE TemplateHaskell #-}
+  data ConfigMap = ConfigMap { cmMeta :: ObjectMeta, cmData :: Map Text Text }
+  deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
+  ```
+
+  The last argument is the record field holding the `ObjectMeta`; pass
+  `False` for a cluster-scoped kind (see `examples/NodeWatcher.hs`, which
+  uses `deriveResource ''Node "" "v1" "Node" "nodes" False 'nodeMeta` and
+  nothing else). Requires `OverloadedStrings` and `TemplateHaskell` in the
+  module.
+
+- **`done` / `requeueAfter` / `requeueNow` / `transientError` /
+  `permanentError`** (`Kubernetes.Operator.Types`): small constructors so a
+  reconciler reads as prose instead of repeating `Right Done` / `Left
+  (TransientError msg)`.
+
+  ```haskell
+  case mCm of
+    Nothing -> logInfo "deleted" >> done
+    Just cm -> checkSpec cm >>= \case
+      Ok        -> done
+      NotReady  -> requeueAfter 2
+      Invalid s -> permanentError s
+  ```
+
 ## Connecting to a cluster
 
 Every example uses `loadKubeConfig`, which tries, in order:
@@ -161,6 +196,7 @@ skips verification — do **not** do this against anything you care about.
 |---|---|
 | `Kubernetes.Client` | The original minimal Pod-only client (`Log`/`KubeClient` effects, auth/TLS setup) that everything else grew from — still a working, standalone example. |
 | `Kubernetes.Resource` | `Resource` typeclass, `ObjectMeta`/`OwnerReference`/`GVK`/`ObjectKey` — the generic vocabulary every other module is written against. |
+| `Kubernetes.Resource.TH` | `deriveResource` — Template Haskell to generate a `Resource` instance from one line. |
 | `Kubernetes.Operator` | Public facade — `import` this, not the individual modules below, for normal use. |
 | `Kubernetes.Operator.Client` | Generalized `KubeClient a`/`KubeWriter a` effects: list/get/watch, create/update/updateStatus, for any `Resource a`. |
 | `Kubernetes.Operator.Cache` | The informer's local read cache. |

@@ -10,6 +10,7 @@
 -- re-exported explicitly below.
 module Kubernetes.Operator
   ( module Kubernetes.Resource
+  , module Kubernetes.Resource.TH
   , module Kubernetes.Operator.Types
   , module Kubernetes.Operator.Cache
   , module Kubernetes.Operator.Workqueue
@@ -59,3 +60,4 @@ import Kubernetes.Operator.Reflector
 import Kubernetes.Operator.Types
 import Kubernetes.Operator.Workqueue
 import Kubernetes.Resource
+import Kubernetes.Resource.TH

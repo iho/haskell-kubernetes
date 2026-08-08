@@ -1,14 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | The minimal read-only operator for a /cluster-scoped/ built-in kind.
 -- Every other example watches a namespaced resource; this one watches Nodes,
--- where 'resourceScope _ = ClusterScoped' and the 'WatchScope' of the
--- 'ControllerSpec' is ignored (there is no namespace to scope by). Logs each
--- Node's readiness whenever its status changes.
+-- where @namespaced = False@ in 'deriveResource' (so the 'Resource' instance
+-- is cluster-scoped and the 'WatchScope' of the 'ControllerSpec' is ignored).
+-- Logs each Node's readiness whenever its status changes.
 --
--- It intentionally decodes only @metadata@ and @status.conditions@ — a real
--- Node has dozens of fields; a 'Resource' instance only needs to model the
--- ones your reconciler actually reads.
+-- This is the most compact of the worked examples: it uses 'deriveResource'
+-- (Template Haskell) to generate the whole 'Resource' instance from one line
+-- instead of hand-writing the five methods, and the 'done'/'requeueAfter'
+-- helpers to spell a reconciler as plain prose. Compare @ConfigMapLogger.hs@
+-- and @PodWatcher.hs@ to see the hand-written version of the same plumbing.
 --
 -- > cabal run node-watcher
 module Main (main) where
@@ -47,12 +50,11 @@ instance FromJSON Node where
   parseJSON = withObject "Node" $ \o ->
     Node <$> o .: "metadata" <*> o .:? "status"
 
-instance Resource Node where
-  resourceGVK _ = GVK "" "v1" "Node"
-  resourceScope _ = ClusterScoped
-  resourcePlural _ = "nodes"
-  resourceMeta = nodeMeta
-  resourceSetMeta m n = n {nodeMeta = m}
+-- | The whole 'Resource' instance in one line: group ""/version "v1"/kind
+-- "Node"/plural "nodes", cluster-scoped, metadata field @nodeMeta@. This
+-- replaces the five hand-written methods below it that the other examples
+-- spell out.
+deriveResource ''Node "" "v1" "Node" "nodes" False 'nodeMeta
 
 nodeReady :: Node -> Bool
 nodeReady n =
@@ -64,10 +66,10 @@ reconcileNode :: (Ctx Node es) => Request -> Eff es (Either ReconcileError Recon
 reconcileNode (Request key) = do
   mNode <- cacheGet @Node key
   case mNode of
-    Nothing -> logInfo (renderKey key <> " deleted") >> pure (Right Done)
+    Nothing -> logInfo (renderKey key <> " deleted") >> done
     Just n -> do
       logInfo (renderKey key <> " ready=" <> T.pack (show (nodeReady n)))
-      pure (Right Done)
+      done
 
 main :: IO ()
 main = do

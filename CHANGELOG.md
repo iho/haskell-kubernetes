@@ -17,3 +17,7 @@
   `configmap-backup` (the write path + owner references against a built-in
   kind), and `service-deployer` (a CRD reconciler that creates and owns a
   Deployment via a hand-rolled cross-kind interpreter stack).
+* DX: `Kubernetes.Resource.TH`'s `deriveResource` generates a `Resource`
+  instance from one line, and `done`/`requeueAfter`/`requeueNow`/
+  `transientError`/`permanentError` in `Kubernetes.Operator.Types` spell a
+  reconciler as prose. Both are re-exported by `Kubernetes.Operator`.
