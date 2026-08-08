@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | A /cross-kind/ operator, the pattern the README lists as a known
 -- limitation: a reconciler for one kind (the custom 'Service' CRD) that
@@ -80,12 +81,10 @@ instance ToJSON Service where
       (serviceSpec x)
       (serviceStatus x)
 
-instance Resource Service where
-  resourceGVK _ = GVK "example.com" "v1" "Service"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "services"
-  resourceMeta = serviceMeta
-  resourceSetMeta m x = x {serviceMeta = m}
+-- | The whole 'Resource' instance in one line (group "example.com"/version
+-- "v1"/kind "Service"/plural "services", namespaced, metadata field
+-- @serviceMeta@).
+deriveResource ''Service "example.com" "v1" "Service" "services" True 'serviceMeta
 
 -- --------------------------------------------------------------------------
 -- The child kind: a Deployment. We model only the handful of fields a real
@@ -140,12 +139,10 @@ instance ToJSON Deployment where
                 ]
           ]
 
-instance Resource Deployment where
-  resourceGVK _ = GVK "apps" "v1" "Deployment"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "deployments"
-  resourceMeta = depMeta
-  resourceSetMeta m d = d {depMeta = m}
+-- | The child kind's 'Resource' instance, also generated in one line
+-- (group "apps"/version "v1"/kind "Deployment"/plural "deployments",
+-- namespaced, metadata field @depMeta@).
+deriveResource ''Deployment "apps" "v1" "Deployment" "deployments" True 'depMeta
 
 -- | The child's name derives from the CR's name.
 depName :: Service -> Text
@@ -188,7 +185,7 @@ reconcileService child (Request key) = do
   case mSvc of
     Nothing -> do
       logInfo (renderKey key <> " deleted")
-      pure (Right Done)
+      done
     Just svc -> do
       mDep <- liftIO (cwGet child (depKey svc))
       case mDep of
@@ -200,18 +197,18 @@ reconcileService child (Request key) = do
                   (serviceSpecReplicas (serviceSpec svc))
                   Nothing
           case setControllerReference svc raw of
-            Left err -> pure (Left (PermanentError err))
+            Left err -> permanentError err
             Right dep -> do
               _ <- liftIO (cwCreate child dep)
               logInfo ("created deployment " <> depName svc)
-              pure (Right (RequeueAfter 1))
+              requeueAfter 1
         Just dep
           | depImage dep /= serviceSpecImage (serviceSpec svc)
               || depReplicas dep /= serviceSpecReplicas (serviceSpec svc) -> do
               let dep' = dep {depImage = serviceSpecImage (serviceSpec svc), depReplicas = serviceSpecReplicas (serviceSpec svc)}
               _ <- liftIO (cwUpdate child dep')
               logInfo ("updated deployment " <> depName svc)
-              pure (Right (RequeueAfter 1))
+              requeueAfter 1
           | otherwise -> do
               -- In sync spec-wise. Report readiness into the CR's status.
               -- We only watch Service CRs, NOT the child Deployment, so the
@@ -222,11 +219,11 @@ reconcileService child (Request key) = do
               let ready = fromMaybe 0 (depReadyReplicas dep)
                   desiredStatus = ServiceStatus ready
               if serviceStatus svc == Just desiredStatus
-                then pure (Right (RequeueAfter 10)) -- in sync: periodic re-poll
+                then requeueAfter 10 -- in sync: periodic re-poll
                 else do
                   _ <- updateStatus (svc {serviceStatus = Just desiredStatus})
                   logInfo (renderKey key <> " readyReplicas=" <> T.pack (show ready))
-                  pure (Right (RequeueAfter 2))
+                  requeueAfter 2
 
 main :: IO ()
 main = do

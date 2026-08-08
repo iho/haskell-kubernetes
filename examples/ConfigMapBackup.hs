@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | The minimal /write/ operator: for every ConfigMap carrying the data key
 -- @kube-hs.example/backup=yes@, keeps a "backup" ConfigMap (same data, name
@@ -49,12 +50,10 @@ instance ToJSON ConfigMap where
       , "data" .= cmData cm
       ]
 
-instance Resource ConfigMap where
-  resourceGVK _ = GVK "" "v1" "ConfigMap"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "configmaps"
-  resourceMeta = cmMeta
-  resourceSetMeta m cm = cm {cmMeta = m}
+-- | The whole 'Resource' instance in one line (group ""/version
+-- "v1"/kind "ConfigMap"/plural "configmaps", namespaced, metadata field
+-- @cmMeta@).
+deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
 backupKey :: Text
 backupKey = "kube-hs-example-backup" -- valid ConfigMap data key (no '/'; '.' allowed, but a clean name reads better)
@@ -86,11 +85,11 @@ reconcileBackup (Request srcKey) = do
   case mSrc of
     Nothing -> do
       logInfo (renderKey srcKey <> " deleted, nothing to back up")
-      pure (Right Done)
+      done
     Just src
       | not (wantsBackup src) -> do
           logInfo (renderKey srcKey <> " no backup tag, skipping")
-          pure (Right Done)
+          done
       | otherwise -> do
           let dstKey = srcKey {okName = backupName srcKey}
           mDst <- getResource @ConfigMap dstKey
@@ -102,19 +101,19 @@ reconcileBackup (Request srcKey) = do
               -- post-LIST), which is a permanent error, not a retry.
               let rawBackup = src {cmData = backupData src, cmMeta = newMeta dstKey}
               case setControllerReference src rawBackup of
-                Left err -> pure (Left (PermanentError err))
+                Left err -> permanentError err
                 Right backup -> do
                   _ <- createResource @ConfigMap backup
                   logInfo ("created backup " <> renderKey dstKey)
-                  pure (Right Done)
+                  done
             Just dst
               | cmData dst == backupData src -> do
                   logInfo (renderKey dstKey <> " already in sync")
-                  pure (Right Done)
+                  done
               | otherwise -> do
                   _ <- updateResource (dst {cmData = backupData src})
                   logInfo ("updated backup " <> renderKey dstKey)
-                  pure (Right Done)
+                  done
   where
     -- A fresh object we own: no resourceVersion yet (it'll be set by the
     -- API server on create), no finalizers/owner refs.

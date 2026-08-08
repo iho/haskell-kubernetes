@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | The production pattern for running more than one replica of an
 -- operator: wrap 'runManager' in 'runWithLeaderElection' so only one
@@ -37,21 +38,19 @@ instance FromJSON ConfigMap where
   parseJSON = withObject "ConfigMap" $ \o ->
     ConfigMap <$> o .: "metadata" <*> (fromMaybe Map.empty <$> o .:? "data")
 
-instance Resource ConfigMap where
-  resourceGVK _ = GVK "" "v1" "ConfigMap"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "configmaps"
-  resourceMeta = cmMeta
-  resourceSetMeta m cm = cm {cmMeta = m}
+-- | The whole 'Resource' instance in one line (group ""/version
+-- "v1"/kind "ConfigMap"/plural "configmaps", namespaced, metadata field
+-- @cmMeta@).
+deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
 reconcileConfigMap :: (Ctx ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
 reconcileConfigMap (Request key) = do
   mCm <- cacheGet @ConfigMap key
   case mCm of
-    Nothing -> logInfo ("configmap " <> renderKey key <> " deleted") >> pure (Right Done)
+    Nothing -> logInfo ("configmap " <> renderKey key <> " deleted") >> done
     Just cm -> do
       logInfo ("configmap " <> renderKey key <> " keys: " <> T.pack (show (Map.keys (cmData cm))))
-      pure (Right Done)
+      done
 
 main :: IO ()
 main = do

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | A minimal, real operator built on "Kubernetes.Operator": watches
 -- ConfigMaps (cluster-wide or in one namespace, per the usual
@@ -41,12 +42,8 @@ instance FromJSON ConfigMap where
 -- | The only bit of plumbing a new Kind needs: where it lives (GVK, REST
 -- plural, namespaced-or-not) and how to get its identity out of a value.
 -- Nothing else in "Kubernetes.Operator" is Pod- or ConfigMap-specific.
-instance Resource ConfigMap where
-  resourceGVK _ = GVK "" "v1" "ConfigMap"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "configmaps"
-  resourceMeta = cmMeta
-  resourceSetMeta m cm = cm {cmMeta = m}
+-- Here the whole instance is generated from one line by 'deriveResource'.
+deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
 -- | The whole reconciler: look the object up by key (never trust an event
 -- payload — see 'Request''s Haddock for why), and log what's there now, or
@@ -59,7 +56,7 @@ reconcileConfigMap (Request key) = do
   case mCm of
     Nothing -> do
       logInfo ("configmap " <> renderKey key <> " deleted")
-      pure (Right Done)
+      done
     Just cm -> do
       logInfo
         ( "configmap "
@@ -67,7 +64,7 @@ reconcileConfigMap (Request key) = do
             <> " keys: "
             <> T.pack (show (Map.keys (cmData cm)))
         )
-      pure (Right Done)
+      done
 
 main :: IO ()
 main = do

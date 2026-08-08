@@ -48,7 +48,7 @@ reconcileWebsite (Request key) = do
   case mSite of
     Nothing -> do
       logInfo ("website " <> renderKey key <> " gone")
-      pure (Right Done)
+      done
     Just site
       | isBeingDeleted site -> finalize site
       | not (hasFinalizer websiteFinalizer site) -> addFinalizer site
@@ -73,7 +73,7 @@ reconcileWebsite (Request key) = do
     -- re-reading a Cache that hasn't caught up with our own write yet.
     addFinalizer site = do
       _ <- ensureFinalizer websiteFinalizer site
-      pure (Right (RequeueAfter 0.5))
+      requeueAfter 0.5
 
     -- Steady state: compute what status should be and write it if (and
     -- only if) it's actually different — see 'reconcileWebsite''s Haddock
@@ -86,7 +86,7 @@ reconcileWebsite (Request key) = do
               , websiteStatusConditions = Just [readyCondition]
               }
       if websiteStatus site == Just newStatus
-        then pure (Right Done)
+        then done
         else do
           _ <- updateStatus (site {websiteStatus = Just newStatus})
           incCounter "website_reconciled_total"
@@ -98,7 +98,7 @@ reconcileWebsite (Request key) = do
                 <> " replicas="
                 <> tshow (websiteSpecReplicas spec)
             )
-          pure (Right Done)
+          done
 
     tshow :: (Show a) => a -> Text
     tshow = T.pack . show

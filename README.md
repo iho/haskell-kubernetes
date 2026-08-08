@@ -74,6 +74,7 @@ trimmed; run it for real with `cabal run configmap-logger`:
 
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Main (main) where
 
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
@@ -84,28 +85,24 @@ import qualified Data.Text as T
 import Effectful (Eff)
 import Kubernetes.Operator
 
--- 1. The type, and the one instance the whole framework needs from it.
+-- 1. The type, and the one instance the whole framework needs from it —
+--    generated from a single line by `deriveResource` (Template Haskell).
 data ConfigMap = ConfigMap { cmMeta :: ObjectMeta, cmData :: Map T.Text T.Text }
 
 instance FromJSON ConfigMap where
   parseJSON = withObject "ConfigMap" $ \o ->
     ConfigMap <$> o .: "metadata" <*> (fromMaybe Map.empty <$> o .:? "data")
 
-instance Resource ConfigMap where
-  resourceGVK _ = GVK "" "v1" "ConfigMap"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "configmaps"
-  resourceMeta = cmMeta
-  resourceSetMeta m cm = cm { cmMeta = m }
+deriveResource ''ConfigMap "" "v1" "ConfigMap" "configmaps" True 'cmMeta
 
 -- 2. The reconciler: read current state from the Cache, react.
 reconcile :: (Ctx ConfigMap es) => Request -> Eff es (Either ReconcileError ReconcileResult)
 reconcile (Request key) = do
   mCm <- cacheGet @ConfigMap key
   case mCm of
-    Nothing -> logInfo (renderKey key <> " deleted") >> pure (Right Done)
+    Nothing -> logInfo (renderKey key <> " deleted") >> done
     Just cm -> logInfo (renderKey key <> " keys: " <> T.pack (show (Map.keys (cmData cm))))
-                 >> pure (Right Done)
+                 >> done
 
 -- 3. Wire it up and run.
 main :: IO ()
@@ -219,9 +216,9 @@ Each is a complete `main`, runnable with `cabal run <name>` against
 | `cabal run ...` | Demonstrates |
 |---|---|
 | `kube-hs` | The original minimal Pod list+watch client (`Kubernetes.Client` directly, no operator framework). |
-| `pod-watcher` | The same list+watch behavior rebuilt on the generic `Resource`/`Ctx` framework, read-only. |
-| `node-watcher` | A read-only operator for a **cluster-scoped** built-in kind (Node) — where `resourceScope _ = ClusterScoped` and `WatchScope` is ignored. |
-| `configmap-logger` | The quickstart above: one read-only `Controller`, metrics endpoint. |
+| `pod-watcher` | The same list+watch behavior rebuilt on the generic `Resource`/`Ctx` framework, read-only; uses `deriveResource`. |
+| `node-watcher` | A read-only operator for a **cluster-scoped** built-in kind (Node) — where `deriveResource ... False` generates a `ClusterScoped` instance and `WatchScope` is ignored. |
+| `configmap-logger` | The quickstart above: one read-only `Controller`, metrics endpoint; uses `deriveResource` + `done`. |
 | `leader-elected-configmap-logger` | The same reconciler wrapped in `runWithLeaderElection` — run two copies with different `IDENTITY` env vars to watch them hand off. |
 | `leader-election-demo` | Leader election in isolation, no controller — just the Lease handoff. |
 | `configmap-backup` | The minimal **write** operator: `compileControllerWithWriter`, `createResource`/`updateResource`, owner references / garbage collection against a built-in kind. |

@@ -21,3 +21,8 @@
   instance from one line, and `done`/`requeueAfter`/`requeueNow`/
   `transientError`/`permanentError` in `Kubernetes.Operator.Types` spell a
   reconciler as prose. Both are re-exported by `Kubernetes.Operator`.
+* The worked examples now use that DX: `configmap-logger`, `pod-watcher`,
+  `node-watcher`, `configmap-backup`, `leader-elected-configmap-logger`
+  and `service-deployer` generate their `Resource` instances with
+  `deriveResource`, and the reconcilers return results with the `done`/
+  `requeueAfter`/`permanentError` helpers.

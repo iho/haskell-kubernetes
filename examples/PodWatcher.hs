@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 -- | The floor: the whole framework works identically for a built-in kind,
 -- not just CRDs — a 'Resource' instance is all a kind ever needs, whether
@@ -29,21 +30,18 @@ instance FromJSON Pod where
     phase <- maybe (pure Nothing) (.:? "phase") status
     pure (Pod meta phase)
 
-instance Resource Pod where
-  resourceGVK _ = GVK "" "v1" "Pod"
-  resourceScope _ = Namespaced
-  resourcePlural _ = "pods"
-  resourceMeta = podMeta
-  resourceSetMeta m p = p {podMeta = m}
+-- | The whole 'Resource' instance in one line (group ""/version
+-- "v1"/kind "Pod"/plural "pods", namespaced, metadata field @podMeta@).
+deriveResource ''Pod "" "v1" "Pod" "pods" True 'podMeta
 
 reconcilePod :: (Ctx Pod es) => Request -> Eff es (Either ReconcileError ReconcileResult)
 reconcilePod (Request key) = do
   mPod <- cacheGet @Pod key
   case mPod of
-    Nothing -> logInfo (renderKey key <> " deleted") >> pure (Right Done)
+    Nothing -> logInfo (renderKey key <> " deleted") >> done
     Just pod -> do
       logInfo (renderKey key <> " phase=" <> fromMaybe "<unknown>" (podPhase pod))
-      pure (Right Done)
+      done
 
 main :: IO ()
 main = do
