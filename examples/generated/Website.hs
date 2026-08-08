@@ -13,19 +13,19 @@ import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import Kubernetes.Resource
 
-data WebsiteSpecPhase = WebsiteSpecPhaseVPending | WebsiteSpecPhaseVActive | WebsiteSpecPhaseVSuspended
+data WebsiteSpecPhase = WebsiteSpecPhasePending | WebsiteSpecPhaseActive | WebsiteSpecPhaseSuspended
   deriving (Show, Eq)
 
 instance Aeson.FromJSON WebsiteSpecPhase where
-  parseJSON (Aeson.String "Pending") = pure WebsiteSpecPhaseVPending
-  parseJSON (Aeson.String "Active") = pure WebsiteSpecPhaseVActive
-  parseJSON (Aeson.String "Suspended") = pure WebsiteSpecPhaseVSuspended
+  parseJSON (Aeson.String "Pending") = pure WebsiteSpecPhasePending
+  parseJSON (Aeson.String "Active") = pure WebsiteSpecPhaseActive
+  parseJSON (Aeson.String "Suspended") = pure WebsiteSpecPhaseSuspended
   parseJSON v = fail ("unknown WebsiteSpecPhase value: " ++ show v)
 
 instance Aeson.ToJSON WebsiteSpecPhase where
-  toJSON WebsiteSpecPhaseVPending = Aeson.String "Pending"
-  toJSON WebsiteSpecPhaseVActive = Aeson.String "Active"
-  toJSON WebsiteSpecPhaseVSuspended = Aeson.String "Suspended"
+  toJSON WebsiteSpecPhasePending = Aeson.String "Pending"
+  toJSON WebsiteSpecPhaseActive = Aeson.String "Active"
+  toJSON WebsiteSpecPhaseSuspended = Aeson.String "Suspended"
 
 
 data WebsiteSpecTemplateEnvItem = WebsiteSpecTemplateEnvItem

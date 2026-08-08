@@ -26,6 +26,7 @@ module Kubernetes.Operator.Client
   , WatchEvent (..)
   , WatchEventType (..)
   , listResources
+  , getResource
   , openWatch
   , nextEvent
   , closeWatch
@@ -33,6 +34,7 @@ module Kubernetes.Operator.Client
 
     -- * Writes (opt-in — see 'KubeWriter')
   , KubeWriter
+  , createResource
   , updateResource
   , updateStatus
   , runKubeWriterIO
@@ -61,7 +63,7 @@ import qualified Data.Text.Encoding.Error as TE
 import Effectful
 import Effectful.Dispatch.Dynamic (interpret, send)
 import Kubernetes.Client (KubeApiError (..), KubeConfig (..))
-import Kubernetes.Resource (GVK (..), ObjectKey (okName), Resource (..), Scope (..), WatchScope (..))
+import Kubernetes.Resource (GVK (..), ObjectKey (..), Resource (..), Scope (..), WatchScope (..))
 import Network.HTTP.Client
   ( BodyReader
   , Manager
@@ -86,6 +88,7 @@ import System.IO (hPutStrLn, stderr)
 
 data KubeClient a :: Effect where
   ListResources :: KubeClient a m (ListResult a)
+  GetResource :: ObjectKey -> KubeClient a m (Maybe a)
   OpenWatch :: Text -> KubeClient a m (WatchHandle a)
   NextEvent :: WatchHandle a -> KubeClient a m (Maybe (WatchEvent a))
   CloseWatch :: WatchHandle a -> KubeClient a m ()
@@ -141,6 +144,11 @@ data WatchHandle a = WatchHandle
 listResources :: (Resource a, KubeClient a :> es) => Eff es (ListResult a)
 listResources = send ListResources
 
+-- | GET a single object by key. 'Nothing' on a 404 (doesn't exist);
+-- anything else unsuccessful is a 'KubeApiError' as usual.
+getResource :: (Resource a, KubeClient a :> es) => ObjectKey -> Eff es (Maybe a)
+getResource = send . GetResource
+
 -- | Open a watch starting just after the given @resourceVersion@ (normally
 -- the one returned by the preceding LIST).
 openWatch :: (Resource a, KubeClient a :> es) => Text -> Eff es (WatchHandle a)
@@ -168,10 +176,18 @@ closeWatch = send . CloseWatch
 -- This is the effect finalizers and status-subresource updates are built
 -- on — see "Kubernetes.Operator.Finalizer".
 data KubeWriter a :: Effect where
+  CreateResource :: a -> KubeWriter a m a
   UpdateResource :: a -> KubeWriter a m a
   UpdateStatusResource :: a -> KubeWriter a m a
 
 type instance DispatchOf (KubeWriter a) = Dynamic
+
+-- | POST a new object to the collection URL. Used for objects this
+-- process itself originates (e.g. a
+-- "Kubernetes.Operator.LeaderElection" 'Kubernetes.Operator.LeaderElection.Lease'
+-- that doesn't exist yet) rather than ones read from a watch\/list first.
+createResource :: (Resource a, ToJSON a, KubeWriter a :> es) => a -> Eff es a
+createResource = send . CreateResource
 
 -- | PUT the object back (its full body, whatever 'ToJSON' produces) to its
 -- own resource URL. The object should normally be one just read out of the
@@ -198,8 +214,24 @@ runKubeWriterIO
   -> Eff (KubeWriter a : es) r
   -> Eff es r
 runKubeWriterIO mgr cfg scope = interpret $ \_ -> \case
+  CreateResource obj -> liftIO (doCreate @a mgr cfg scope obj)
   UpdateResource obj -> liftIO (doWrite @a mgr cfg scope "" obj)
   UpdateStatusResource obj -> liftIO (doWrite @a mgr cfg scope "/status" obj)
+
+doCreate :: forall a. (Resource a, ToJSON a, FromJSON a) => Manager -> KubeConfig -> WatchScope -> a -> IO a
+doCreate mgr cfg scope obj = do
+  req0 <- buildRequest cfg (resourcePath @a scope) []
+  let req =
+        req0
+          { method = "POST"
+          , requestBody = RequestBodyLBS (Aeson.encode obj)
+          , requestHeaders = (hContentType, "application/json") : requestHeaders req0
+          }
+  resp <- httpLbs req mgr
+  checkStatus (responseStatus resp) (responseBody resp)
+  case eitherDecodeStrict (BL.toStrict (responseBody resp)) of
+    Left err -> throwIO (KubeApiError 0 ("failed to decode create response: " <> T.pack err))
+    Right created -> pure created
 
 doWrite :: forall a. (Resource a, ToJSON a, FromJSON a) => Manager -> KubeConfig -> WatchScope -> String -> a -> IO a
 doWrite mgr cfg scope suffix obj = do
@@ -230,6 +262,7 @@ runKubeClientIO
   -> Eff es r
 runKubeClientIO mgr cfg scope = interpret $ \_ -> \case
   ListResources -> liftIO (doListResources @a mgr cfg scope)
+  GetResource key -> liftIO (doGetResource @a mgr cfg scope key)
   OpenWatch rv -> liftIO (doOpenWatch @a mgr cfg scope rv)
   NextEvent wh -> liftIO (readNextEvent wh)
   CloseWatch wh -> liftIO (responseClose (whResponse wh))
@@ -271,6 +304,19 @@ doListResources mgr cfg scope = do
   case eitherDecodeStrict (BL.toStrict (responseBody resp)) of
     Left err -> throwIO (KubeApiError 0 ("failed to decode list: " <> T.pack err))
     Right result -> pure result
+
+doGetResource :: forall a. (Resource a, FromJSON a) => Manager -> KubeConfig -> WatchScope -> ObjectKey -> IO (Maybe a)
+doGetResource mgr cfg scope key = do
+  req <- buildRequest cfg (resourcePath @a scope <> "/" <> T.unpack (okName key)) []
+  resp <- httpLbs req mgr
+  let st = responseStatus resp
+  if statusCode st == 404
+    then pure Nothing
+    else do
+      checkStatus st (responseBody resp)
+      case eitherDecodeStrict (BL.toStrict (responseBody resp)) of
+        Left err -> throwIO (KubeApiError 0 ("failed to decode get response: " <> T.pack err))
+        Right result -> pure (Just result)
 
 doOpenWatch :: forall a. (Resource a) => Manager -> KubeConfig -> WatchScope -> Text -> IO (WatchHandle a)
 doOpenWatch mgr cfg scope rv = do

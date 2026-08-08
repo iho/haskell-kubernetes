@@ -184,7 +184,7 @@ renderEnum tyName values =
          ]
       ++ ["  toJSON " <> c <> " = Aeson.String " <> hsString v | (c, v) <- zip ctors values]
   where
-    ctors = [typeName [tyName, "V" <> sanitizeIdent v] | v <- values]
+    ctors = [tyName <> upperFirst (sanitizeIdent v) | v <- values]
 
 -- | A record type plus its 'Data.Aeson.FromJSON'\/'Data.Aeson.ToJSON'
 -- instances, built as an ordinary applicative-chain parser and an

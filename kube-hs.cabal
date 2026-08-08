@@ -68,6 +68,7 @@ library
                        , Kubernetes.Operator.Manager
                        , Kubernetes.Operator.Metrics
                        , Kubernetes.Operator.Finalizer
+                       , Kubernetes.Operator.LeaderElection
                        , Kubernetes.Codegen.Schema
                        , Kubernetes.Codegen.Generate
     other-modules:      Kubernetes.Operator.Internal.Async
@@ -143,6 +144,17 @@ executable website-operator
       , effectful
       , aeson
       , containers
+      , text
+
+executable leader-election-demo
+    import:              warnings
+    main-is:             LeaderElectionDemo.hs
+    hs-source-dirs:      examples
+    default-language:    GHC2024
+    default-extensions:  OverloadedStrings
+    build-depends:
+        base             ^>=4.20.2.0
+      , kube-hs
       , text
 
 executable crd-codegen
