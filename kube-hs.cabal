@@ -68,6 +68,7 @@ library
                        , Kubernetes.Operator.Manager
                        , Kubernetes.Operator.Metrics
                        , Kubernetes.Operator.Finalizer
+                       , Kubernetes.Operator.OwnerReference
                        , Kubernetes.Operator.LeaderElection
                        , Kubernetes.Operator.Webhook
                        , Kubernetes.Codegen.Schema

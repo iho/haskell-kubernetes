@@ -205,7 +205,7 @@ finalizerScenario = do
             , kcNamespace = NS "default"
             }
         scope = WatchNamespace "default"
-        objLive = FinObj (ObjectMeta "fin-a" (Just "default") (Just "10") Nothing Nothing [])
+        objLive = FinObj (ObjectMeta "fin-a" (Just "default") (Just "10") Nothing Nothing [] [])
     mgr <- newManagerFor cfg
     runEff . runKubeWriterIO @FinObj mgr cfg scope $ do
       -- 1. Not being deleted, finalizer absent: ensureFinalizer should add
@@ -215,7 +215,7 @@ finalizerScenario = do
 
       -- 2. Simulate what the API server would show next: deletion
       -- requested, our finalizer (and only ours) still present.
-      let objBeingDeleted = FinObj (ObjectMeta "fin-a" (Just "default") (Just "11") Nothing (Just "2024-01-01T00:00:00Z") [finalizerName])
+      let objBeingDeleted = FinObj (ObjectMeta "fin-a" (Just "default") (Just "11") Nothing (Just "2024-01-01T00:00:00Z") [finalizerName] [])
       result <-
         finalizeAndRemove
           finalizerName
@@ -239,6 +239,98 @@ finalizerScenario = do
     (show finalizerListsSeen)
 
 -- --------------------------------------------------------------------------
+-- Scenario 3: "Kubernetes.Operator.OwnerReference", both the pure helpers
+-- (no server involved) and 'ensureControllerReference' against the same
+-- kind of recording fake server as scenario 2 — it's type-agnostic (decodes
+-- PUT bodies as plain 'Aeson.Value' and echoes them back), so it works
+-- unchanged for a different 'Resource' kind.
+-- --------------------------------------------------------------------------
+
+data ChildObj = ChildObj {coMeta :: ObjectMeta}
+  deriving (Show, Eq)
+
+instance FromJSON ChildObj where
+  parseJSON = withObject "ChildObj" $ \o -> ChildObj <$> o .: "metadata"
+
+instance ToJSON ChildObj where
+  toJSON co = object ["metadata" .= coMeta co]
+
+instance Resource ChildObj where
+  resourceGVK _ = GVK "" "v1" "ChildObj"
+  resourceScope _ = Namespaced
+  resourcePlural _ = "childobjs"
+  resourceMeta = coMeta
+  resourceSetMeta m co = co {coMeta = m}
+
+isLeft' :: Either a b -> Bool
+isLeft' = either (const True) (const False)
+
+ownerReferenceScenario :: IO Bool
+ownerReferenceScenario = do
+  putBodiesRef <- newTVarIO []
+  let owner = FinObj (ObjectMeta "owner-a" (Just "default") (Just "5") (Just "owner-uid-123") Nothing [] [])
+      otherOwner = FinObj (ObjectMeta "owner-b" (Just "default") (Just "9") (Just "owner-uid-999") Nothing [] [])
+      ownerNoUid = FinObj (ObjectMeta "owner-c" (Just "default") Nothing Nothing Nothing [] [])
+      child = ChildObj (ObjectMeta "child-a" (Just "default") (Just "1") Nothing Nothing [] [])
+
+      ownedChild = case setControllerReference owner child of
+        Right c -> c
+        Left err -> error ("test setup: unexpected conflict: " <> T.unpack err)
+
+      pureChecks =
+        [ ("controllerRef fails without the owner having a UID yet", isLeft' (controllerRef ownerNoUid))
+        , ( "setControllerReference records the owner's apiVersion/kind/name/uid, marked as controller"
+          , case findControllerRef (resourceMeta ownedChild) of
+              Nothing -> False
+              Just ref ->
+                orApiVersion ref == "v1"
+                  && orKind ref == "FinObj"
+                  && orName ref == "owner-a"
+                  && orUid ref == "owner-uid-123"
+                  && orController ref == Just True
+                  && orBlockOwnerDeletion ref == Just True
+          )
+        , ("setControllerReference is a no-op once the same owner is already set", setControllerReference owner ownedChild == Right ownedChild)
+        , ("setControllerReference refuses to overwrite a different existing controller", isLeft' (setControllerReference otherOwner ownedChild))
+        ]
+
+  (writeResult, noopResult, conflictResult) <-
+    Warp.testWithApplication (pure (writerFakeServer putBodiesRef)) $ \port -> do
+      let cfg =
+            KubeConfig
+              { kcBaseUrl = "http://127.0.0.1:" <> T.pack (show port)
+              , kcToken = Nothing
+              , kcCaFile = Nothing
+              , kcInsecureSkipTLSVerify = False
+              , kcNamespace = NS "default"
+              }
+          scope = WatchNamespace "default"
+      mgr <- newManagerFor cfg
+      runEff . runKubeWriterIO @ChildObj mgr cfg scope $ do
+        -- child has no owner reference yet: persists one, reports True.
+        r1 <- ensureControllerReference owner child
+        -- ownedChild already carries the right one: no write, reports False.
+        r2 <- ensureControllerReference owner ownedChild
+        -- a different owner trying to claim an already-controlled child: an error, not a write.
+        r3 <- ensureControllerReference otherOwner ownedChild
+        pure (r1, r2, r3)
+
+  bodies <- readTVarIO putBodiesRef
+  reportExpectations
+    "owner-reference"
+    ( pureChecks
+        ++ [ ("ensureControllerReference persists a write and reports True when unset", writeResult == Right True)
+           , ("ensureControllerReference makes no write and reports False when already set", noopResult == Right False)
+           , ("ensureControllerReference reports a PermanentError on a controller conflict, without writing", isLeftReconcile conflictResult)
+           , ("exactly one PUT was issued (only for the unset -> set transition)", length bodies == 1)
+           ]
+    )
+    (show (writeResult, noopResult, conflictResult))
+  where
+    isLeftReconcile (Left (PermanentError _)) = True
+    isLeftReconcile _ = False
+
+-- --------------------------------------------------------------------------
 
 reportExpectations :: String -> [(String, Bool)] -> String -> IO Bool
 reportExpectations scenario expectations context = do
@@ -259,6 +351,10 @@ main = do
     finalizerScenario `catch` \(e :: SomeException) -> do
       hPutStrLn stderr ("FAILED [finalizer]: scenario crashed: " <> show e)
       pure False
-  if r1 && r2
+  r3 <-
+    ownerReferenceScenario `catch` \(e :: SomeException) -> do
+      hPutStrLn stderr ("FAILED [owner-reference]: scenario crashed: " <> show e)
+      pure False
+  if r1 && r2 && r3
     then putStrLn "ALL SCENARIOS PASSED"
     else exitFailure

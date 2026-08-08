@@ -19,6 +19,7 @@ module Kubernetes.Operator
   , module Kubernetes.Operator.Manager
   , module Kubernetes.Operator.Metrics
   , module Kubernetes.Operator.Finalizer
+  , module Kubernetes.Operator.OwnerReference
   , module Kubernetes.Operator.LeaderElection
 
     -- * Reused from "Kubernetes.Client"
@@ -50,6 +51,7 @@ import Kubernetes.Operator.Cache
 import Kubernetes.Operator.Client
 import Kubernetes.Operator.Controller
 import Kubernetes.Operator.Finalizer
+import Kubernetes.Operator.OwnerReference
 import Kubernetes.Operator.LeaderElection
 import Kubernetes.Operator.Manager
 import Kubernetes.Operator.Metrics

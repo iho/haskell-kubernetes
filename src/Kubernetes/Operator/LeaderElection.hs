@@ -240,7 +240,7 @@ runWithLeaderElection kubeConfig lec onStartLeading onStoppedLeading = do
 
     freshLease now =
       Lease
-        { leaseMeta = ObjectMeta (lecLeaseName lec) (Just (lecNamespace lec)) Nothing Nothing Nothing []
+        { leaseMeta = ObjectMeta (lecLeaseName lec) (Just (lecNamespace lec)) Nothing Nothing Nothing [] []
         , leaseSpec = claim now
         }
 

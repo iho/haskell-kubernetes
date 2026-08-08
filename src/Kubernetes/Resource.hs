@@ -14,6 +14,7 @@ module Kubernetes.Resource
   , ObjectKey (..)
   , renderKey
   , ObjectMeta (..)
+  , OwnerReference (..)
   , Resource (..)
   , IntOrString (..)
   , envelopeParseJSON
@@ -78,10 +79,10 @@ renderKey (ObjectKey Nothing n) = n
 renderKey (ObjectKey (Just ns) n) = ns <> "/" <> n
 
 -- | The subset of every object's @metadata@ the generic machinery cares
--- about. Enough for caching, keying, and finalizers — deliberately not a
--- full copy of every possible metadata field (labels/annotations/owner
--- references are all still missing; add them here if a reconciler needs
--- them, following the same pattern).
+-- about. Enough for caching, keying, finalizers, and ownership —
+-- deliberately not a full copy of every possible metadata field
+-- (labels\/annotations are still missing; add them here if a reconciler
+-- needs them, following the same pattern).
 data ObjectMeta = ObjectMeta
   { omName :: !Text
   , omNamespace :: !(Maybe Text)
@@ -89,6 +90,7 @@ data ObjectMeta = ObjectMeta
   , omUid :: !(Maybe Text)
   , omDeletionTimestamp :: !(Maybe Text)
   , omFinalizers :: ![Text]
+  , omOwnerReferences :: ![OwnerReference]
   }
   deriving (Show, Eq)
 
@@ -101,6 +103,7 @@ instance FromJSON ObjectMeta where
       <*> o .:? "uid"
       <*> o .:? "deletionTimestamp"
       <*> (fromMaybe [] <$> o .:? "finalizers")
+      <*> (fromMaybe [] <$> o .:? "ownerReferences")
 
 -- | Only needed for write operations (see
 -- 'Kubernetes.Operator.Client.KubeWriter'); read-only controllers never
@@ -113,12 +116,61 @@ instance ToJSON ObjectMeta where
     object $
       [ "name" .= omName m
       , "finalizers" .= omFinalizers m
+      , "ownerReferences" .= omOwnerReferences m
       ]
         ++ catMaybes
           [ ("namespace" .=) <$> omNamespace m
           , ("resourceVersion" .=) <$> omResourceVersion m
           , ("uid" .=) <$> omUid m
           , ("deletionTimestamp" .=) <$> omDeletionTimestamp m
+          ]
+
+-- | A back-reference recorded on a /dependent/ object pointing at the
+-- /owner/ object responsible for it — the mechanism the real API server's
+-- built-in garbage collector uses to decide what to delete when the owner
+-- goes away. This library never deletes anything itself: setting this
+-- field correctly (see "Kubernetes.Operator.OwnerReference") is the whole
+-- job, since the cluster's own garbage-collector controller does the
+-- actual cascading delete, entirely server-side, once the owner is gone.
+data OwnerReference = OwnerReference
+  { orApiVersion :: !Text
+  , orKind :: !Text
+  , orName :: !Text
+  , orUid :: !Text
+  , orController :: !(Maybe Bool)
+  -- ^ 'Just True' marks this as the /managing/ controller — at most one
+  -- owner reference should set this, mirroring the real API server's
+  -- (loosely enforced, client-side-conventional) rule that an object has
+  -- at most one controller.
+  , orBlockOwnerDeletion :: !(Maybe Bool)
+  -- ^ 'Just True' asks the API server to refuse deleting the owner via the
+  -- foreground policy until this dependent is gone too. Client-set (the
+  -- API server only /honours/ it, it doesn't compute it), so it's just
+  -- another field this library writes — not something it enforces itself.
+  }
+  deriving (Show, Eq)
+
+instance FromJSON OwnerReference where
+  parseJSON = withObject "OwnerReference" $ \o ->
+    OwnerReference
+      <$> o .: "apiVersion"
+      <*> o .: "kind"
+      <*> o .: "name"
+      <*> o .: "uid"
+      <*> o .:? "controller"
+      <*> o .:? "blockOwnerDeletion"
+
+instance ToJSON OwnerReference where
+  toJSON r =
+    object $
+      [ "apiVersion" .= orApiVersion r
+      , "kind" .= orKind r
+      , "name" .= orName r
+      , "uid" .= orUid r
+      ]
+        ++ catMaybes
+          [ ("controller" .=) <$> orController r
+          , ("blockOwnerDeletion" .=) <$> orBlockOwnerDeletion r
           ]
 
 -- | One instance per Kind you want to list/watch/reconcile — Pod,
