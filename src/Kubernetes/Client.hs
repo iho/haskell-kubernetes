@@ -110,7 +110,13 @@ import qualified Network.HTTP.Types as HTTP
 import Network.Connection (TLSSettings (TLSSettings, TLSSettingsSimple))
 import Network.HTTP.Client (defaultManagerSettings, newManager)
 import Network.HTTP.Client.TLS (mkManagerSettings, newTlsManager, newTlsManagerWith)
-import Network.TLS (ClientParams (clientShared), Shared (sharedCAStore), defaultParamsClient)
+import Network.TLS
+  ( ClientParams (clientShared, clientSupported)
+  , Shared (sharedCAStore)
+  , Supported (supportedCiphers)
+  , defaultParamsClient
+  )
+import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (readCertificateStore)
 import qualified Data.Text.IO as TIO
 import System.Directory (doesFileExist)
@@ -144,6 +150,21 @@ data KubeConfig = KubeConfig
 -- for quick tests against a self-signed cluster), the system trust store, or
 -- plain HTTP for @kubectl proxy@. Shared by the Pod demo below and by the
 -- operator framework's 'Kubernetes.Operator.Controller.compileController'.
+--
+-- Note on 'kcBaseUrl' by IP: the @x509-validation@ package (unlike Go's
+-- @crypto\/x509@, which every other Kubernetes client relies on) only
+-- matches DNS-name SAN entries — it has no code path for IP-address SANs
+-- at all, even though @connection@\/@http-client-tls@ give no way to
+-- validate a connection against a *different* name than the one actually
+-- dialed (its 'Network.Connection.makeTLSParams' unconditionally
+-- overwrites whatever hostname a supplied 'TLS.ClientParams' set). So
+-- connecting to the API server by IP address here will always fail
+-- certificate validation, regardless of whether that IP is a legitimate
+-- SAN. 'loadKubeConfig' avoids this for the in-cluster case by using the
+-- DNS name @kubernetes.default.svc@ (which every conformant Kubernetes
+-- distribution's apiserver cert includes, and which cluster DNS resolves
+-- to the same ClusterIP) instead of the literal
+-- @KUBERNETES_SERVICE_HOST@ IP.
 newManagerFor :: KubeConfig -> IO Manager
 newManagerFor cfg
   | kcInsecureSkipTLSVerify cfg =
@@ -164,7 +185,18 @@ mkTlsManagerFromCA caFile sniHost = do
   mStore <- readCertificateStore caFile
   store <- maybe (ioError (userError ("could not read CA file: " <> caFile))) pure mStore
   let baseParams = defaultParamsClient sniHost ""
-      params = baseParams {clientShared = (clientShared baseParams) {sharedCAStore = store}}
+      params =
+        baseParams
+          { clientShared = (clientShared baseParams) {sharedCAStore = store}
+          , -- 'defaultParamsClient' otherwise leaves 'supportedCiphers' empty
+            -- (the @tls@ package deliberately doesn't pick one for you) —
+            -- an empty list makes every real TLS 1.2/1.3 handshake fail
+            -- with a server-side "handshake_failure" alert, since there is
+            -- nothing to negotiate. Only surfaces against a real TLS server
+            -- (e.g. in-cluster, or a real cluster's HTTPS endpoint); every
+            -- @kubectl proxy@-based test is plain HTTP and never hits this.
+            clientSupported = (clientSupported baseParams) {supportedCiphers = ciphersuite_default}
+          }
   newTlsManagerWith (mkManagerSettings (TLSSettings params) Nothing)
 
 saTokenPath, saCaPath :: FilePath
@@ -205,12 +237,16 @@ loadKubeConfig = do
       if inCluster
         then do
           token <- T.strip <$> TIO.readFile saTokenPath
-          svcHost <- getEnvOrDie "KUBERNETES_SERVICE_HOST"
+          -- Deliberately *not* @KUBERNETES_SERVICE_HOST@ (a bare IP): see
+          -- 'newManagerFor''s Haddock for why connecting by IP can never
+          -- pass certificate validation with this TLS stack. The DNS name
+          -- resolves to the exact same ClusterIP via cluster DNS and is a
+          -- SAN every apiserver certificate includes.
           svcPort <- fromMaybe "443" <$> lookupEnv "KUBERNETES_SERVICE_PORT"
           caExists <- doesFileExist saCaPath
           pure
             KubeConfig
-              { kcBaseUrl = T.pack ("https://" <> svcHost <> ":" <> svcPort)
+              { kcBaseUrl = T.pack ("https://kubernetes.default.svc:" <> svcPort)
               , kcToken = Just token
               , kcCaFile = if caExists then Just saCaPath else Nothing
               , kcInsecureSkipTLSVerify = False
@@ -225,9 +261,6 @@ loadKubeConfig = do
               , kcInsecureSkipTLSVerify = False
               , kcNamespace = ns
               }
-  where
-    getEnvOrDie name =
-      lookupEnv name >>= maybe (ioError (userError ("missing required env var " <> name))) pure
 
 loadNamespace :: IO Namespace
 loadNamespace = do

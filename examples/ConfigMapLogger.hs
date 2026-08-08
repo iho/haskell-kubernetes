@@ -21,6 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Effectful (Eff)
 import Kubernetes.Operator
+import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 
 -- | Everything the generic machinery needs to know about a ConfigMap: its
 -- identity ('ObjectMeta', reused as-is) plus the one field this reconciler
@@ -70,6 +71,11 @@ reconcileConfigMap (Request key) = do
 
 main :: IO ()
 main = do
+  -- Container runtimes capture stdout as a pipe, not a TTY, so GHC defaults
+  -- to full block buffering — log lines would otherwise sit unflushed
+  -- indefinitely in a long-running controller. Without this, `kubectl
+  -- logs` on a real deployment shows nothing at all.
+  hSetBuffering stdout LineBuffering
   kubeConfig <- loadKubeConfig
   let scope = case kcNamespace kubeConfig of
         AllNamespaces -> WatchAllNamespaces
