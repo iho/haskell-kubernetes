@@ -128,6 +128,7 @@ executable configmap-logger
     hs-source-dirs:      examples
     default-language:    GHC2024
     default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
     build-depends:
         base             ^>=4.20.2.0
       , kube-hs
@@ -143,6 +144,7 @@ executable website-operator
     hs-source-dirs:      examples, examples/generated
     default-language:    GHC2024
     default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
     build-depends:
         base             ^>=4.20.2.0
       , kube-hs
@@ -185,6 +187,7 @@ executable leader-elected-configmap-logger
     hs-source-dirs:      examples
     default-language:    GHC2024
     default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
     build-depends:
         base             ^>=4.20.2.0
       , kube-hs
@@ -199,6 +202,7 @@ executable pod-watcher
     hs-source-dirs:      examples
     default-language:    GHC2024
     default-extensions:  OverloadedStrings
+    ghc-options:         -threaded
     build-depends:
         base             ^>=4.20.2.0
       , kube-hs

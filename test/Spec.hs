@@ -135,7 +135,8 @@ pipelineScenario = do
             , csMaxRetries = 3
             , csReconcile = recordingReconciler seenRef
             }
-    controller <- compileController cfg defaultOperatorConfig spec
+    metrics <- newMetricsRegistry
+    controller <- compileController cfg defaultOperatorConfig metrics spec
     runAsync <- Async.async (ccRun controller)
     threadDelay 800000 -- let the LIST and the full watch stream be processed
     ccShutdown controller

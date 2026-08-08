@@ -27,7 +27,7 @@ import Kubernetes.Client (KubeConfig, Log, logErr, newManagerFor, runLogIO)
 import Kubernetes.Operator.Cache (Cache, CacheStore, newCacheStore, runCacheIO)
 import Kubernetes.Operator.Client (KubeClient, KubeWriter, runKubeClientIO, runKubeWriterIO)
 import Kubernetes.Operator.Internal.Async (withAsyncs)
-import Kubernetes.Operator.Metrics (Metrics, runMetricsIO)
+import Kubernetes.Operator.Metrics (Metrics, MetricsRegistry, runMetricsPrometheus)
 import Kubernetes.Operator.Reflector (reflectorLoop)
 import Kubernetes.Operator.Types
   ( OperatorConfig
@@ -216,8 +216,16 @@ runReflectorAndWorkers oneWorker workers =
 -- with the API server, and a pool of 'csWorkers' worker threads running
 -- 'workerLoop'. See 'compileControllerWithWriter' for a reconciler that
 -- also needs to write.
-compileController :: forall a. (Resource a, FromJSON a) => KubeConfig -> OperatorConfig -> ControllerSpec a -> IO CompiledController
-compileController kubeConfig opConfig spec = do
+--
+-- The 'MetricsRegistry' is deliberately a parameter here rather than
+-- created internally: a process running several controllers under one
+-- 'Kubernetes.Operator.Manager.runManager' should share a single registry
+-- (and hence a single @\/metrics@ endpoint, via
+-- 'Kubernetes.Operator.Metrics.withMetricsServer') — create one with
+-- 'Kubernetes.Operator.Metrics.newMetricsRegistry' in @main@ and pass it
+-- to every 'compileController' call.
+compileController :: forall a. (Resource a, FromJSON a) => KubeConfig -> OperatorConfig -> MetricsRegistry -> ControllerSpec a -> IO CompiledController
+compileController kubeConfig opConfig metrics spec = do
   mgr <- newManagerFor kubeConfig
   cacheStore <- newCacheStore :: IO (CacheStore a)
   wq <- newWorkqueue 1 60 :: IO (WorkqueueHandle ObjectKey) -- 1s base / 60s max reconcile backoff; not yet exposed via OperatorConfig
@@ -228,7 +236,7 @@ compileController kubeConfig opConfig spec = do
         runEff
           . runReader opConfig
           . runLogIO
-          . runMetricsIO
+          . runMetricsPrometheus metrics
           . runWorkqueueIO wq
           . runCacheIO cacheStore
           . runKubeClientIO @a mgr kubeConfig (csScope spec)
@@ -244,8 +252,8 @@ compileController kubeConfig opConfig spec = do
 -- 'Kubernetes.Operator.Client.runKubeWriterIO' into the stack, which is
 -- what makes 'Kubernetes.Operator.Client.updateResource' \/ 'updateStatus'
 -- (and hence "Kubernetes.Operator.Finalizer") available to 'crsReconcile'.
-compileControllerWithWriter :: forall a. (Resource a, FromJSON a, ToJSON a) => KubeConfig -> OperatorConfig -> ControllerSpecRW a -> IO CompiledController
-compileControllerWithWriter kubeConfig opConfig spec = do
+compileControllerWithWriter :: forall a. (Resource a, FromJSON a, ToJSON a) => KubeConfig -> OperatorConfig -> MetricsRegistry -> ControllerSpecRW a -> IO CompiledController
+compileControllerWithWriter kubeConfig opConfig metrics spec = do
   mgr <- newManagerFor kubeConfig
   cacheStore <- newCacheStore :: IO (CacheStore a)
   wq <- newWorkqueue 1 60 :: IO (WorkqueueHandle ObjectKey)
@@ -256,7 +264,7 @@ compileControllerWithWriter kubeConfig opConfig spec = do
         runEff
           . runReader opConfig
           . runLogIO
-          . runMetricsIO
+          . runMetricsPrometheus metrics
           . runWorkqueueIO wq
           . runCacheIO cacheStore
           . runKubeWriterIO @a mgr kubeConfig (crsScope spec)

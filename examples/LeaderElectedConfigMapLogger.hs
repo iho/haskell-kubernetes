@@ -78,16 +78,23 @@ main = do
         AllNamespaces -> "default" -- Leases are namespaced; pick one to coordinate in regardless of watch scope.
       lec = defaultLeaderElectionConfig "configmap-logger-leader" leaderNamespace identity
 
+  -- Served for the whole process lifetime, not just while leading: a
+  -- standby replica is still alive and worth scraping (e.g. to alert if
+  -- *no* replica has been leader for too long), the same way a real HA
+  -- operator's /metrics and /healthz stay up regardless of leader status.
+  metrics <- newMetricsRegistry
+  controller <- compileController kubeConfig defaultOperatorConfig metrics spec
+
   putStrLn (T.unpack identity <> ": trying to acquire leadership...")
-  controller <- compileController kubeConfig defaultOperatorConfig spec
-  runWithLeaderElection
-    kubeConfig
-    lec
-    ( do
-        putStrLn (T.unpack identity <> ": elected leader, starting controller")
-        runManager defaultManagerConfig [controller]
-    )
-    (putStrLn (T.unpack identity <> ": lost leadership, controller stopped"))
+  withMetricsServer 9090 metrics $
+    runWithLeaderElection
+      kubeConfig
+      lec
+      ( do
+          putStrLn (T.unpack identity <> ": elected leader, starting controller")
+          runManager defaultManagerConfig [controller]
+      )
+      (putStrLn (T.unpack identity <> ": lost leadership, controller stopped"))
   where
     orElseEnv :: IO (Maybe String) -> String -> IO (Maybe String)
     orElseEnv first fallbackName = do

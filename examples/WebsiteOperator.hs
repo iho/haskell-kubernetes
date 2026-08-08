@@ -121,5 +121,6 @@ main = do
           , crsReconcile = reconcileWebsite
           }
 
-  controller <- compileControllerWithWriter kubeConfig defaultOperatorConfig spec
-  runManager defaultManagerConfig [controller]
+  metrics <- newMetricsRegistry
+  controller <- compileControllerWithWriter kubeConfig defaultOperatorConfig metrics spec
+  withMetricsServer 9090 metrics (runManager defaultManagerConfig [controller])

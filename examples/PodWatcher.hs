@@ -63,5 +63,6 @@ main = do
           , csReconcile = reconcilePod
           }
 
-  controller <- compileController kubeConfig defaultOperatorConfig spec
-  runManager defaultManagerConfig [controller]
+  metrics <- newMetricsRegistry
+  controller <- compileController kubeConfig defaultOperatorConfig metrics spec
+  withMetricsServer 9090 metrics (runManager defaultManagerConfig [controller])
